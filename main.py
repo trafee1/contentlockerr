@@ -116,15 +116,9 @@ BUTTON_L2_SELECTION_MODE = get_env("BUTTON_L2_SELECTION_MODE", "first").lower()
 BUTTON_L2_CLICK_COUNT = get_env("BUTTON_L2_CLICK_COUNT", "1").strip().lower()
 L2_DELAY_MIN, L2_DELAY_MAX = parse_range("BUTTON_L2_DELAY_RANGE", 2.0, 4.0)
 
-# SCROLL_MODE can be: off, before{20,80}, after{30,90}, random{25,90}
 RAW_SCROLL_MODE = get_env("SCROLL_MODE", "off").strip()
 
 def parse_scroll_specification(spec_str: str):
-    """
-    Parses scroll config:
-    Returns (mode, min_pct, max_pct)
-    Modes: 'off', 'before', 'after', 'random'
-    """
     spec_str = spec_str.strip()
     if not spec_str or spec_str.lower() in ("off", "none", "false", "0"):
         return "off", 0.0, 0.0
@@ -150,15 +144,10 @@ def parse_scroll_specification(spec_str: str):
 PARSED_SCROLL_MODE, SCROLL_MIN_PCT, SCROLL_MAX_PCT = parse_scroll_specification(RAW_SCROLL_MODE)
 
 def resolve_bot_scroll():
-    """Resolves specific runtime scroll action and percentage for an individual bot run."""
     if PARSED_SCROLL_MODE == "off":
         return "off", 0.0
-    
     target_pct = round(random.uniform(SCROLL_MIN_PCT, SCROLL_MAX_PCT), 1)
-    if PARSED_SCROLL_MODE == "random":
-        chosen_timing = random.choice(["before", "after"])
-    else:
-        chosen_timing = PARSED_SCROLL_MODE
+    chosen_timing = random.choice(["before", "after"]) if PARSED_SCROLL_MODE == "random" else PARSED_SCROLL_MODE
     return chosen_timing, target_pct
 
 def parse_target_pattern(pat_str: str) -> dict:
@@ -194,7 +183,7 @@ def resolve_target_click_count(count_setting: str) -> str:
 
 def resolve_initial_wait_ms(wait_setting: str) -> int:
     if wait_setting in ("fully_loaded", "default", "load", ""):
-        return 1500
+        return 3000
     if "," in wait_setting:
         parts = [p.strip() for p in wait_setting.split(",") if p.strip()]
         try:
@@ -202,14 +191,14 @@ def resolve_initial_wait_ms(wait_setting: str) -> int:
             w_max = float(parts[1]) if len(parts) >= 2 else w_min
             return int(random.uniform(w_min, w_max) * 1000)
         except ValueError:
-            return 1500
+            return 3000
     try:
         return int(float(wait_setting) * 1000)
     except ValueError:
-        return 1500
+        return 3000
 
-def generate_js_scenario_script(scroll_timing: str, scroll_pct: float) -> str:
-    l1_patterns = [parse_target_pattern(t) for t in BUTTON_TARGETS if t.strip()] if (BUTTON_CLICK_ENABLE and BUTTON_TARGETS) else []
+def generate_js_scenario_json(scroll_timing: str, scroll_pct: float) -> str:
+    l1_patterns = [parse_target_pattern(t) for t in BUTTON_TARGETS if t.strip()]
     l1_count_str = resolve_target_click_count(BUTTON_CLICK_COUNT)
     l1_wait_ms = resolve_initial_wait_ms(BUTTON_PAGE_LOAD_WAIT)
 
@@ -220,78 +209,118 @@ def generate_js_scenario_script(scroll_timing: str, scroll_pct: float) -> str:
 
     l1_patterns_json = json.dumps(l1_patterns)
     l2_patterns_json = json.dumps(l2_patterns)
-    has_buttons = bool(BUTTON_CLICK_ENABLE and BUTTON_TARGETS)
+    has_buttons = bool(BUTTON_CLICK_ENABLE)
 
-    js_code = f"""(async function() {{
+    # Injected browser script compiles telemetry directly into #__scraperapi_telemetry__
+    js_evaluate = f"""(async function() {{
+        const telemetry = {{
+            page_loaded_ms: {l1_wait_ms},
+            scroll_performed: null,
+            offers_found: [],
+            clicked: [],
+            level: 0
+        }};
+
         const sleep = ms => new Promise(r => setTimeout(r, ms));
         await sleep({l1_wait_ms});
 
         async function performSmoothScroll(pct) {{
-            if (!pct || pct <= 0) return 0;
-            const scrollHeight = Math.max(
-                document.body.scrollHeight, document.documentElement.scrollHeight,
-                document.body.offsetHeight, document.documentElement.offsetHeight,
-                document.body.clientHeight, document.documentElement.clientHeight
-            );
-            const viewPortHeight = window.innerHeight || document.documentElement.clientHeight;
-            const maxScrollable = Math.max(0, scrollHeight - viewPortHeight);
-            const targetY = Math.floor(maxScrollable * (Math.min(100, pct) / 100.0));
-            
-            let currentY = window.pageYOffset || document.documentElement.scrollTop;
-            const step = Math.max(15, Math.floor(Math.abs(targetY - currentY) / 18));
-            
-            while (Math.abs(targetY - currentY) > step) {{
-                currentY += (targetY > currentY) ? step : -step;
-                window.scrollTo(0, currentY);
-                await sleep(25);
-            }}
-            window.scrollTo(0, targetY);
-            await sleep(350);
-            return targetY;
+            if (!pct || pct <= 0) return;
+            try {{
+                const scrollHeight = Math.max(
+                    document.body.scrollHeight, document.documentElement.scrollHeight,
+                    document.body.offsetHeight, document.documentElement.offsetHeight,
+                    document.body.clientHeight, document.documentElement.clientHeight
+                );
+                const viewPortHeight = window.innerHeight || document.documentElement.clientHeight;
+                const maxScrollable = Math.max(0, scrollHeight - viewPortHeight);
+                const targetY = Math.floor(maxScrollable * (Math.min(100, pct) / 100.0));
+                
+                let currentY = window.pageYOffset || document.documentElement.scrollTop;
+                const step = Math.max(15, Math.floor(Math.abs(targetY - currentY) / 18));
+                while (Math.abs(targetY - currentY) > step) {{
+                    currentY += (targetY > currentY) ? step : -step;
+                    window.scrollTo(0, currentY);
+                    await sleep(25);
+                }}
+                window.scrollTo(0, targetY);
+                telemetry.scroll_performed = {{ timing: '{scroll_timing}', percent: pct, target_pixels: targetY }};
+                await sleep(350);
+            }} catch(e) {{}}
         }}
 
-        function findMatchingElements(patterns) {{
-            if (!patterns || patterns.length === 0) return [];
-            const interactiveSelectors = 'button, a, input[type="button"], input[type="submit"], [role="button"], span, div, p';
-            const allElements = Array.from(document.querySelectorAll(interactiveSelectors));
+        function getAllRoots() {{
+            const roots = [document];
+            try {{
+                const iframes = Array.from(document.querySelectorAll('iframe'));
+                for (const f of iframes) {{
+                    try {{
+                        const doc = f.contentDocument || (f.contentWindow && f.contentWindow.document);
+                        if (doc) roots.push(doc);
+                    }} catch(e) {{}}
+                }}
+            }} catch(e) {{}}
+            return roots;
+        }}
 
-            for (const pat of patterns) {{
-                const targetText = pat.text.trim();
-                const matched = [];
+        function scanElements(patterns) {{
+            const roots = getAllRoots();
+            const selectorList = 'a, button, input[type="button"], input[type="submit"], [role="button"], tr, li, div, span, p';
+            const allAvailableTitles = [];
+            const matched = [];
 
-                for (const el of allElements) {{
-                    const elText = (el.innerText || el.textContent || el.value || '').toLowerCase();
-                    if (!elText.includes(targetText)) continue;
+            // Pattern Match
+            if (patterns && patterns.length > 0) {{
+                for (const pat of patterns) {{
+                    const targetText = pat.text.trim().toLowerCase();
+                    for (const root of roots) {{
+                        const elements = Array.from(root.querySelectorAll(selectorList));
+                        for (const el of elements) {{
+                            const rawText = (el.innerText || el.textContent || el.value || '').trim();
+                            const lowerText = rawText.toLowerCase();
+                            if (!lowerText) continue;
 
-                    if (pat.tags && pat.tags.length > 0) {{
-                        let curr = el;
-                        let matchedTags = true;
-                        for (let i = pat.tags.length - 1; i >= 0; i--) {{
-                            const expectedTag = pat.tags[i];
-                            const ancestor = curr.closest(expectedTag);
-                            if (!ancestor) {{
-                                matchedTags = false;
-                                break;
+                            if (rawText.length > 1 and rawText.length < 80 and !allAvailableTitles.includes(rawText)) {{
+                                allAvailableTitles.push(rawText);
                             }}
-                            curr = ancestor.parentElement;
-                            if (!curr && i > 0) {{
-                                matchedTags = false;
-                                break;
+
+                            if (lowerText.includes(targetText)) {{
+                                let clickable = el.closest('a, button, [role="button"], input[type="submit"]') || el;
+                                if (!matched.includes(clickable)) {{
+                                    matched.push({{ element: clickable, title: rawText }});
+                                }}
                             }}
                         }}
-                        if (matchedTags) matched.push(el);
-                    }} else {{
-                        matched.push(el);
+                    }}
+                    if (matched.length > 0) break;
+                }}
+            }}
+
+            // Automatic Fallback: Auto-detect any locker offers on page
+            if (matched.length === 0) {{
+                for (const root of roots) {{
+                    const offerElements = Array.from(root.querySelectorAll('a[href*="offer"], a[href*="click"], a[href*="target"], .offer, .offer_item, .locker_item, li.offer, div.offer, a.btn, a.button, a[href]'));
+                    for (const ol of offerElements) {{
+                        const rawText = (ol.innerText || ol.textContent || ol.value || '').trim();
+                        const realClickable = ol.closest('a, button, [role="button"]') || ol;
+                        const entryTitle = rawText ? rawText.substring(0, 50) : 'Locker-Offer-Element';
+                        if (!matched.some(m => m.element === realClickable)) {{
+                            matched.push({{ element: realClickable, title: entryTitle }});
+                        }}
+                        if (rawText && !allAvailableTitles.includes(rawText)) {{
+                            allAvailableTitles.push(rawText.substring(0, 50));
+                        }}
                     }}
                 }}
-                if (matched.length > 0) return matched;
             }}
-            return [];
+
+            telemetry.offers_found = allAvailableTitles.slice(0, 8);
+            return matched;
         }}
 
-        function selectAndClick(elements, mode, countLimit) {{
-            if (!elements || elements.length === 0) return 0;
-            let candidates = [...elements];
+        function selectAndClick(matchedItems, mode, countLimit) {{
+            if (!matchedItems || matchedItems.length === 0) return 0;
+            let candidates = [...matchedItems];
             if (mode === 'last') candidates.reverse();
             else if (mode === 'random') candidates.sort(() => Math.random() - 0.5);
 
@@ -299,44 +328,76 @@ def generate_js_scenario_script(scroll_timing: str, scroll_pct: float) -> str:
             let clicked = 0;
 
             for (let i = 0; i < maxClicks; i++) {{
-                const target = candidates[i];
+                const item = candidates[i];
+                const target = item.element;
                 try {{
                     target.scrollIntoView({{behavior: 'smooth', block: 'center'}});
-                    target.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true}}));
-                    target.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true}}));
+                    target.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true, cancelable: true, view: window}}));
+                    target.dispatchEvent(new MouseEvent('mouseenter', {{bubbles: true, cancelable: true, view: window}}));
+                    target.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true, cancelable: true, view: window}}));
                     target.focus();
+                    target.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true, cancelable: true, view: window}}));
                     target.click();
-                    target.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true}}));
+
+                    try {{
+                        const touchObj = new Touch({{identifier: Date.now(), target: target, clientX: 100, clientY: 100}});
+                        target.dispatchEvent(new TouchEvent('touchstart', {{bubbles: true, touches: [touchObj]}}));
+                        target.dispatchEvent(new TouchEvent('touchend', {{bubbles: true, touches: [touchObj]}}));
+                    }} catch(te) {{}}
+
+                    telemetry.clicked.push(item.title);
                     clicked++;
                 }} catch (e) {{}}
             }}
             return clicked;
         }}
 
-        // Execution: BEFORE Scroll
         if ('{scroll_timing}' === 'before') {{
             await performSmoothScroll({scroll_pct});
         }}
 
-        let l1ClickedCount = 0;
         if ({str(has_buttons).lower()}) {{
-            const l1Matched = findMatchingElements({l1_patterns_json});
-            l1ClickedCount = selectAndClick(l1Matched, '{BUTTON_SELECTION_MODE}', {l1_count_str});
+            telemetry.level = 1;
+            let l1Matched = [];
+            for (let attempt = 0; attempt < 12; attempt++) {{
+                l1Matched = scanElements({l1_patterns_json});
+                if (l1Matched.length > 0) break;
+                await sleep(500);
+            }}
+
+            const l1ClickedCount = selectAndClick(l1Matched, '{BUTTON_SELECTION_MODE}', {l1_count_str});
 
             if ({str(l2_active).lower()} && l1ClickedCount > 0) {{
                 await sleep({l2_delay_ms});
-                const l2Matched = findMatchingElements({l2_patterns_json});
+                let l2Matched = scanElements({l2_patterns_json});
                 selectAndClick(l2Matched, '{BUTTON_L2_SELECTION_MODE}', {l2_count_str});
+                telemetry.level = 2;
             }}
         }}
 
-        // Execution: AFTER Scroll
         if ('{scroll_timing}' === 'after') {{
             await sleep(600);
             await performSmoothScroll({scroll_pct});
         }}
+
+        // Write telemetry element into DOM for python retrieval
+        try {{
+            const telNode = document.createElement('div');
+            telNode.id = '__scraperapi_telemetry__';
+            telNode.style.display = 'none';
+            telNode.textContent = JSON.stringify(telemetry);
+            document.body.appendChild(telNode);
+        }} catch(e) {{}}
     }})();"""
-    return js_code
+
+    # Format according to official ScraperAPI scenario protocol
+    scenario_payload = {
+        "instructions": [
+            {"wait_for": "body"},
+            {"evaluate": js_evaluate}
+        ]
+    }
+    return json.dumps(scenario_payload)
 
 
 # =========================================================
@@ -1225,7 +1286,6 @@ RESIDENTIAL = parse_bool("RESIDENTIAL", default=False)
 # Sticky Session: Default to TRUE
 STICKY_SESSION = parse_bool("STICKY_SESSION", default=True)
 
-# Generate a high-range base salt for distinct bot pools
 BOT_POOL_SALT = random.randint(100000, 999999)
 
 def get_bot_session_id(bot_id: int) -> str:
@@ -1281,17 +1341,16 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
         session_id = str(random.randint(1000000, 9999999))
         session_tag = "Rotate"
 
-    # Evaluate dynamic scroll and button execution for this bot
     bot_scroll_timing, bot_scroll_pct = resolve_bot_scroll()
     needs_automation = bool((BUTTON_CLICK_ENABLE and BUTTON_TARGETS) or (bot_scroll_timing != "off"))
     
     runtime_render = BROWSER_RENDERING
-    custom_js = ""
+    custom_scenario_json = ""
     tags = []
 
     if needs_automation:
-        custom_js = generate_js_scenario_script(bot_scroll_timing, bot_scroll_pct)
-        runtime_render = "true"  # Requires headless browser for scenario execution
+        custom_scenario_json = generate_js_scenario_json(bot_scroll_timing, bot_scroll_pct)
+        runtime_render = "true"
         if BUTTON_CLICK_ENABLE and BUTTON_TARGETS:
             tags.append("[BTN-AUTO]")
         if bot_scroll_timing != "off":
@@ -1309,8 +1368,8 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
         "retry": "false",
         "url": target_url
     }
-    if custom_js:
-        params["js_scenario"] = custom_js
+    if custom_scenario_json:
+        params["js_scenario"] = custom_scenario_json
     if code_upper:
         params["country_code"] = code_upper.lower()
     if RESIDENTIAL:
@@ -1346,9 +1405,7 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
     req = urllib.request.Request(url, headers=headers)
 
     try:
-        # Full 180s timeout prevents dropping the connection while ScraperAPI processes clicks/scrolls
         with urllib.request.urlopen(req, timeout=180) as resp:
-            # Drain full response body to prevent closing before bot actions finish
             response_chunks = []
             while True:
                 chunk = resp.read(65536)
@@ -1357,6 +1414,7 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
                 response_chunks.append(chunk)
             full_body = b"".join(response_chunks)
             body_size_kb = len(full_body) / 1024.0
+            body_str = full_body.decode("utf-8", errors="ignore")
 
             actual_credits = resp.headers.get("sa-credit-cost", str(expected_credits))
             exit_country = (
@@ -1378,6 +1436,35 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
                     f"[{ltype} {slug}] [{session_tag}]{extra_tags_str} [Target: {truncated_target}] [Ref: {ref_display}] "
                     f"[Body: {body_size_kb:.1f} KB] [Credits: ~{actual_credits} cost] [{key_obj.tag}] -> HTTP {resp.status} OK"
                 )
+
+                # Parse and print real-time telemetry from remote headless Chromium execution
+                tel_match = re.search(r'<div id="__scraperapi_telemetry__"[^>]*>(.*?)</div>', body_str, re.DOTALL)
+                if tel_match:
+                    try:
+                        telemetry_data = json.loads(tel_match.group(1).strip())
+                        p_wait = telemetry_data.get("page_loaded_ms", 3000)
+                        offers_found = telemetry_data.get("offers_found", [])
+                        clicked_list = telemetry_data.get("clicked", [])
+                        scroll_info = telemetry_data.get("scroll_performed")
+
+                        print(f"       -> [Page Ready]: Stabilized after {p_wait/1000.0:.1f}s")
+                        
+                        if offers_found:
+                            display_offers = " | ".join([f'"{o}"' for o in offers_found[:4]])
+                            print(f"       -> [Locker Offers Detected]: {len(offers_found)} found -> [{display_offers}]")
+                        else:
+                            print(f"       -> [Locker Offers Detected]: None explicitly rendered (Locker still loading or direct redirection)")
+
+                        if clicked_list:
+                            display_clicks = " | ".join([f'"{c}"' for c in clicked_list])
+                            print(f"       -> [BUTTON ACTION SUCCESS]: Clicked -> [{display_clicks}]")
+                        elif BUTTON_CLICK_ENABLE:
+                            print(f"       -> [BUTTON ACTION]: No actionable offer button could be triggered in this view")
+
+                        if scroll_info:
+                            print(f"       -> [Scroll Telemetry]: Scrolled {scroll_info.get('timing')} click to {scroll_info.get('percent')}% ({scroll_info.get('target_pixels')}px)")
+                    except Exception:
+                        pass
 
     except urllib.error.HTTPError as e:
         try:
@@ -1468,9 +1555,6 @@ def main():
             used_countries_this_cycle = set()
             bot_country_assignments = [pick_datacenter_country(used_countries_this_cycle) for _ in range(worker_count)]
 
-            # -------------------------------------------------------------
-            # STRICT EXECUTION BARRIER: AWAIT ALL ASSIGNED BOTS COMPLETION
-            # -------------------------------------------------------------
             if PARALLELBOT:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
                     futures = []
@@ -1485,7 +1569,6 @@ def main():
                                 cat, ua_str, ua_label, tier_label, code_upper, code_lower
                             )
                         )
-                    # Guaranteed: All threads MUST complete their response + post waits before leaving this block
                     concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_COMPLETED)
             else:
                 for idx, (url, slug, ltype) in enumerate(tasks):
