@@ -77,6 +77,10 @@ def parse_native_ratio(var_name: str, default_pct: float = 80.0) -> float:
     except Exception:
         return default_pct / 100.0
 
+
+# ---------------------------------------------------------
+# Dynamic Tier Ratio Parser
+# ---------------------------------------------------------
 def parse_tier_ratio(var_name="TIER_RATIO", default=(70.0, 25.0, 5.0)):
     raw = get_env(var_name)
     if not raw:
@@ -98,300 +102,6 @@ def parse_tier_ratio(var_name="TIER_RATIO", default=(70.0, 25.0, 5.0)):
     return default
 
 T1_RATIO, T2_RATIO, T3_RATIO = parse_tier_ratio("TIER_RATIO", (70.0, 25.0, 5.0))
-
-
-# =========================================================
-# DYNAMIC SCROLL & BUTTON ENGINE
-# =========================================================
-
-BUTTON_CLICK_ENABLE = parse_bool("BUTTON_CLICK_ENABLE", default=False)
-BUTTON_TARGETS = parse_list("BUTTON_TARGETS", [])
-BUTTON_SELECTION_MODE = get_env("BUTTON_SELECTION_MODE", "first").lower()
-BUTTON_CLICK_COUNT = get_env("BUTTON_CLICK_COUNT", "1").strip().lower()
-BUTTON_PAGE_LOAD_WAIT = get_env("BUTTON_PAGE_LOAD_WAIT", "fully_loaded").strip().lower()
-
-BUTTON_L2_CLICK_ENABLE = parse_bool("BUTTON_L2_CLICK_ENABLE", default=False)
-BUTTON_L2_TARGETS = parse_list("BUTTON_L2_TARGETS", [])
-BUTTON_L2_SELECTION_MODE = get_env("BUTTON_L2_SELECTION_MODE", "first").lower()
-BUTTON_L2_CLICK_COUNT = get_env("BUTTON_L2_CLICK_COUNT", "1").strip().lower()
-L2_DELAY_MIN, L2_DELAY_MAX = parse_range("BUTTON_L2_DELAY_RANGE", 2.0, 4.0)
-
-RAW_SCROLL_MODE = get_env("SCROLL_MODE", "off").strip()
-
-def parse_scroll_specification(spec_str: str):
-    spec_str = spec_str.strip()
-    if not spec_str or spec_str.lower() in ("off", "none", "false", "0"):
-        return "off", 0.0, 0.0
-
-    match = re.match(r"^(before|after|random)\{([^}]+)\}$", spec_str, re.IGNORECASE)
-    if match:
-        mode = match.group(1).lower()
-        parts = [p.strip() for p in match.group(2).split(",") if p.strip()]
-        try:
-            if len(parts) >= 2:
-                p_min = min(100.0, max(1.0, float(parts[0])))
-                p_max = min(100.0, max(1.0, float(parts[1])))
-                if p_min > p_max:
-                    p_min, p_max = p_max, p_min
-                return mode, p_min, p_max
-            elif len(parts) == 1:
-                p_val = min(100.0, max(1.0, float(parts[0])))
-                return mode, p_val, p_val
-        except ValueError:
-            return "off", 0.0, 0.0
-    return "off", 0.0, 0.0
-
-PARSED_SCROLL_MODE, SCROLL_MIN_PCT, SCROLL_MAX_PCT = parse_scroll_specification(RAW_SCROLL_MODE)
-
-def resolve_bot_scroll():
-    if PARSED_SCROLL_MODE == "off":
-        return "off", 0.0
-    target_pct = round(random.uniform(SCROLL_MIN_PCT, SCROLL_MAX_PCT), 1)
-    chosen_timing = random.choice(["before", "after"]) if PARSED_SCROLL_MODE == "random" else PARSED_SCROLL_MODE
-    return chosen_timing, target_pct
-
-def parse_target_pattern(pat_str: str) -> dict:
-    pat_str = pat_str.strip()
-    tags = []
-    curr = pat_str
-    while "{" in curr and curr.endswith("}"):
-        tag_part, rest = curr.split("{", 1)
-        tag_part = tag_part.strip().lower()
-        if tag_part:
-            tags.append(tag_part)
-        curr = rest[:-1].strip()
-    return {"tags": tags, "text": curr.lower()}
-
-def resolve_target_click_count(count_setting: str) -> str:
-    if count_setting in ("all", "-1"):
-        return '"all"'
-    if "," in count_setting:
-        parts = [p.strip() for p in count_setting.split(",") if p.strip()]
-        try:
-            low = int(parts[0])
-            high = int(parts[1]) if len(parts) >= 2 else low
-            if low > high:
-                low, high = high, low
-            chosen = random.randint(low, high)
-            return str(chosen)
-        except ValueError:
-            return "1"
-    try:
-        return str(max(1, int(count_setting)))
-    except ValueError:
-        return "1"
-
-def resolve_initial_wait_ms(wait_setting: str) -> int:
-    if wait_setting in ("fully_loaded", "default", "load", ""):
-        return 3500
-    if "," in wait_setting:
-        parts = [p.strip() for p in wait_setting.split(",") if p.strip()]
-        try:
-            w_min = float(parts[0])
-            w_max = float(parts[1]) if len(parts) >= 2 else w_min
-            return int(random.uniform(w_min, w_max) * 1000)
-        except ValueError:
-            return 3500
-    try:
-        return int(float(wait_setting) * 1000)
-    except ValueError:
-        return 3500
-
-def generate_js_scenario_object(scroll_timing: str, scroll_pct: float) -> dict:
-    l1_patterns = [parse_target_pattern(t) for t in BUTTON_TARGETS if t.strip()]
-    l1_count_str = resolve_target_click_count(BUTTON_CLICK_COUNT)
-    l1_wait_ms = resolve_initial_wait_ms(BUTTON_PAGE_LOAD_WAIT)
-
-    l2_active = BUTTON_L2_CLICK_ENABLE and bool(BUTTON_L2_TARGETS) and BUTTON_CLICK_ENABLE
-    l2_patterns = [parse_target_pattern(t) for t in BUTTON_L2_TARGETS if t.strip()] if l2_active else []
-    l2_count_str = resolve_target_click_count(BUTTON_L2_CLICK_COUNT) if l2_active else "1"
-    l2_delay_ms = int(random.uniform(L2_DELAY_MIN, L2_DELAY_MAX) * 1000)
-
-    l1_patterns_json = json.dumps(l1_patterns)
-    l2_patterns_json = json.dumps(l2_patterns)
-    has_buttons = bool(BUTTON_CLICK_ENABLE)
-
-    js_evaluate = f"""(async function() {{
-        const telemetry = {{
-            page_loaded_ms: {l1_wait_ms},
-            scroll_performed: null,
-            offers_found: [],
-            clicked: [],
-            level: 0
-        }};
-
-        const sleep = ms => new Promise(r => setTimeout(r, ms));
-        await sleep({l1_wait_ms});
-
-        async function performSmoothScroll(pct) {{
-            if (!pct || pct <= 0) return;
-            try {{
-                const scrollHeight = Math.max(
-                    document.body.scrollHeight, document.documentElement.scrollHeight,
-                    document.body.offsetHeight, document.documentElement.offsetHeight,
-                    document.body.clientHeight, document.documentElement.clientHeight
-                );
-                const viewPortHeight = window.innerHeight || document.documentElement.clientHeight;
-                const maxScrollable = Math.max(0, scrollHeight - viewPortHeight);
-                const targetY = Math.floor(maxScrollable * (Math.min(100, pct) / 100.0));
-                
-                let currentY = window.pageYOffset || document.documentElement.scrollTop;
-                const step = Math.max(15, Math.floor(Math.abs(targetY - currentY) / 18));
-                while (Math.abs(targetY - currentY) > step) {{
-                    currentY += (targetY > currentY) ? step : -step;
-                    window.scrollTo(0, currentY);
-                    await sleep(25);
-                }}
-                window.scrollTo(0, targetY);
-                telemetry.scroll_performed = {{ timing: '{scroll_timing}', percent: pct, target_pixels: targetY }};
-                await sleep(350);
-            }} catch(e) {{}}
-        }}
-
-        function getAllRoots() {{
-            const roots = [document];
-            try {{
-                const iframes = Array.from(document.querySelectorAll('iframe'));
-                for (const f of iframes) {{
-                    try {{
-                        const doc = f.contentDocument || (f.contentWindow && f.contentWindow.document);
-                        if (doc) roots.push(doc);
-                    }} catch(e) {{}}
-                }}
-            }} catch(e) {{}}
-            return roots;
-        }}
-
-        function scanElements(patterns) {{
-            const roots = getAllRoots();
-            const selectorList = 'a, button, input[type="button"], input[type="submit"], [role="button"], tr, li, div, span, p';
-            const allAvailableTitles = [];
-            const matched = [];
-
-            if (patterns && patterns.length > 0) {{
-                for (const pat of patterns) {{
-                    const targetText = pat.text.trim().toLowerCase();
-                    for (const root of roots) {{
-                        const elements = Array.from(root.querySelectorAll(selectorList));
-                        for (const el of elements) {{
-                            const rawText = (el.innerText || el.textContent || el.value || '').trim();
-                            const lowerText = rawText.toLowerCase();
-                            if (!lowerText) continue;
-
-                            if (rawText.length > 1 && rawText.length < 80 && !allAvailableTitles.includes(rawText)) {{
-                                allAvailableTitles.push(rawText);
-                            }}
-
-                            if (lowerText.includes(targetText)) {{
-                                let clickable = el.closest('a, button, [role="button"], input[type="submit"]') || el;
-                                if (!matched.some(m => m.element === clickable)) {{
-                                    matched.push({{ element: clickable, title: rawText }});
-                                }}
-                            }}
-                        }}
-                    }}
-                    if (matched.length > 0) break;
-                }}
-            }}
-
-            if (matched.length === 0) {{
-                for (const root of roots) {{
-                    const offerElements = Array.from(root.querySelectorAll('a[href*="offer"], a[href*="click"], a[href*="target"], .offer, .offer_item, .locker_item, li.offer, div.offer, a.btn, a.button, a[href]'));
-                    for (const ol of offerElements) {{
-                        const rawText = (ol.innerText || ol.textContent || ol.value || '').trim();
-                        const realClickable = ol.closest('a, button, [role="button"]') || ol;
-                        const entryTitle = rawText ? rawText.substring(0, 50) : 'Locker-Offer-Element';
-                        if (!matched.some(m => m.element === realClickable)) {{
-                            matched.push({{ element: realClickable, title: entryTitle }});
-                        }}
-                        if (rawText && !allAvailableTitles.includes(rawText)) {{
-                            allAvailableTitles.push(rawText.substring(0, 50));
-                        }}
-                    }}
-                }}
-            }}
-
-            telemetry.offers_found = allAvailableTitles.slice(0, 8);
-            return matched;
-        }}
-
-        function selectAndClick(matchedItems, mode, countLimit) {{
-            if (!matchedItems || matchedItems.length === 0) return 0;
-            let candidates = [...matchedItems];
-            if (mode === 'last') candidates.reverse();
-            else if (mode === 'random') candidates.sort(() => Math.random() - 0.5);
-
-            let maxClicks = (countLimit === 'all') ? candidates.length : Math.min(candidates.length, parseInt(countLimit, 10) || 1);
-            let clicked = 0;
-
-            for (let i = 0; i < maxClicks; i++) {{
-                const item = candidates[i];
-                const target = item.element;
-                try {{
-                    target.scrollIntoView({{behavior: 'smooth', block: 'center'}});
-                    target.dispatchEvent(new MouseEvent('mouseover', {{bubbles: true, cancelable: true, view: window}}));
-                    target.dispatchEvent(new MouseEvent('mouseenter', {{bubbles: true, cancelable: true, view: window}}));
-                    target.dispatchEvent(new MouseEvent('mousedown', {{bubbles: true, cancelable: true, view: window}}));
-                    target.focus();
-                    target.dispatchEvent(new MouseEvent('mouseup', {{bubbles: true, cancelable: true, view: window}}));
-                    target.click();
-
-                    try {{
-                        const touchObj = new Touch({{identifier: Date.now(), target: target, clientX: 100, clientY: 100}});
-                        target.dispatchEvent(new TouchEvent('touchstart', {{bubbles: true, touches: [touchObj]}}));
-                        target.dispatchEvent(new TouchEvent('touchend', {{bubbles: true, touches: [touchObj]}}));
-                    }} catch(te) {{}}
-
-                    telemetry.clicked.push(item.title);
-                    clicked++;
-                }} catch (e) {{}}
-            }}
-            return clicked;
-        }}
-
-        if ('{scroll_timing}' === 'before') {{
-            await performSmoothScroll({scroll_pct});
-        }}
-
-        if ({str(has_buttons).lower()}) {{
-            telemetry.level = 1;
-            let l1Matched = [];
-            for (let attempt = 0; attempt < 12; attempt++) {{
-                l1Matched = scanElements({l1_patterns_json});
-                if (l1Matched.length > 0) break;
-                await sleep(500);
-            }}
-
-            const l1ClickedCount = selectAndClick(l1Matched, '{BUTTON_SELECTION_MODE}', {l1_count_str});
-
-            if ({str(l2_active).lower()} && l1ClickedCount > 0) {{
-                await sleep({l2_delay_ms});
-                let l2Matched = scanElements({l2_patterns_json});
-                selectAndClick(l2Matched, '{BUTTON_L2_SELECTION_MODE}', {l2_count_str});
-                telemetry.level = 2;
-            }}
-        }}
-
-        if ('{scroll_timing}' === 'after') {{
-            await sleep(600);
-            await performSmoothScroll({scroll_pct});
-        }}
-
-        try {{
-            const telNode = document.createElement('div');
-            telNode.id = '__scraperapi_telemetry__';
-            telNode.style.display = 'none';
-            telNode.textContent = JSON.stringify(telemetry);
-            document.body.appendChild(telNode);
-        }} catch(e) {{}}
-    }})();"""
-
-    return {
-        "instructions": [
-            {"wait_for": "body"},
-            {"evaluate": js_evaluate}
-        ]
-    }
 
 
 # =========================================================
@@ -590,13 +300,13 @@ LINUX_FF_HIGH = [
 ]
 LINUX_FF_MID = [
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0",
+    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0",
     "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0",
 ]
 LINUX_FF_LOW = [
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 LINUX_OPERA_ALL = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 OPR/114.0.0.0",
@@ -971,142 +681,102 @@ def resolve_cycle_ua(used_uas_in_cycle: set) -> tuple:
     used_uas_in_cycle.add(ua)
     return cat, ua, label
 
-# ---------------------------------------------------------
-# Datacenter Country Pool
-# ---------------------------------------------------------
-ALL_DATACENTER_NON_PREMIUM = [
-    ("AE", "United Arab Emirates"), ("AR", "Argentina"), ("AT", "Austria"),
-    ("AU", "Australia"), ("BE", "Belgium"), ("BG", "Bulgaria"),
-    ("BR", "Brazil"), ("CA", "Canada"), ("CH", "Switzerland"),
-    ("CL", "Chile"), ("CO", "Colombia"), ("CZ", "Czech Republic"),
-    ("DE", "Germany"), ("DK", "Denmark"), ("ES", "Spain"),
-    ("FI", "Finland"), ("FR", "France"), ("GB", "United Kingdom"),
-    ("GR", "Greece"), ("HK", "Hong Kong"), ("HR", "Croatia"),
-    ("HU", "Hungary"), ("ID", "Indonesia"), ("IE", "Ireland"),
-    ("IL", "Israel"), ("IN", "India"), ("IT", "Italy"),
-    ("JP", "Japan"), ("KR", "South Korea"), ("MX", "Mexico"),
-    ("MY", "Malaysia"), ("NL", "Netherlands"), ("NO", "Norway"),
-    ("NZ", "New Zealand"), ("PH", "Philippines"), ("PL", "Poland"),
-    ("PT", "Portugal"), ("RO", "Romania"), ("RS", "Serbia"),
-    ("SA", "Saudi Arabia"), ("SE", "Sweden"), ("SG", "Singapore"),
-    ("SK", "Slovakia"), ("TH", "Thailand"), ("TR", "Turkey"),
-    ("TW", "Taiwan"), ("UA", "Ukraine"), ("US", "United States"),
-    ("VN", "Vietnam"), ("ZA", "South Africa")
-]
-ALL_DATACENTER_NON_PREMIUM = sorted(ALL_DATACENTER_NON_PREMIUM, key=lambda x: x[1])
 
-DATACENTER_CODE_TO_NAME = {code.upper(): name for code, name in ALL_DATACENTER_NON_PREMIUM}
-DATACENTER_NAME_TO_CODE = {name.lower(): code.upper() for code, name in ALL_DATACENTER_NON_PREMIUM}
+# =========================================================
+# ADVANCED INSTRUCTION SET (ScraperAPI Official Standard)
+# =========================================================
 
-TIER_1_CODES = {"US", "GB", "CA", "DE", "FR", "ES", "IT", "NL", "JP", "SG", "AU", "SE", "MX", "BR", "KR"}
-TIER_2_CODES = {"AE", "AR", "AT", "BE", "CH", "CL", "CO", "CZ", "DK", "FI", "HK", "IE", "IL", "IN", "NO", "NZ", "PL", "PT", "RO", "SA", "TR", "TW", "ZA"}
-TIER_3_CODES = {"BG", "GR", "HR", "HU", "ID", "MY", "PH", "RS", "SK", "TH", "UA", "VN"}
+BUTTON_CLICK_ENABLE = parse_bool("BUTTON_CLICK_ENABLE", default=False)
+BUTTON_TARGETS = parse_list("BUTTON_TARGETS", [])
+BUTTON_SELECTION_MODE = get_env("BUTTON_SELECTION_MODE", "first").lower()
+BUTTON_CLICK_COUNT = get_env("BUTTON_CLICK_COUNT", "1").strip().lower()
+BUTTON_PAGE_LOAD_WAIT = get_env("BUTTON_PAGE_LOAD_WAIT", "fully_loaded").strip().lower()
 
-def parse_country_config(raw_cfg: str):
-    inc, exc = set(), set()
-    warnings = set()
-    if not raw_cfg.strip():
-        return inc, exc
+BUTTON_L2_CLICK_ENABLE = parse_bool("BUTTON_L2_CLICK_ENABLE", default=False)
+BUTTON_L2_TARGETS = parse_list("BUTTON_L2_TARGETS", [])
+BUTTON_L2_SELECTION_MODE = get_env("BUTTON_L2_SELECTION_MODE", "first").lower()
+BUTTON_L2_CLICK_COUNT = get_env("BUTTON_L2_CLICK_COUNT", "1").strip().lower()
+L2_DELAY_MIN, L2_DELAY_MAX = parse_range("BUTTON_L2_DELAY_RANGE", 2.0, 4.0)
 
-    tokens = [t.strip() for t in re.split(r",(?![^{]*\})", raw_cfg) if t.strip()]
-    for token in tokens:
-        match = re.match(r"^(include|exclude)\{([^\}]+)\}$", token, re.IGNORECASE)
-        if match:
-            mode = match.group(1).lower()
-            items = [c.strip().lower() for c in match.group(2).split(",") if c.strip()]
-            for item in items:
-                resolved_code = item.upper()
-                if item.upper() in DATACENTER_CODE_TO_NAME:
-                    resolved_code = item.upper()
-                elif item in DATACENTER_NAME_TO_CODE:
-                    resolved_code = DATACENTER_NAME_TO_CODE[item]
-                else:
-                    warnings.add(resolved_code)
+RAW_SCROLL_MODE = get_env("SCROLL_MODE", "off").strip()
 
-                if mode == "include":
-                    inc.add(resolved_code)
-                else:
-                    exc.add(resolved_code)
-        else:
-            items = [c.strip().lower() for c in token.split(",") if c.strip()]
-            for item in items:
-                resolved_code = item.upper()
-                if item.upper() in DATACENTER_CODE_TO_NAME:
-                    resolved_code = item.upper()
-                elif item in DATACENTER_NAME_TO_CODE:
-                    resolved_code = DATACENTER_NAME_TO_CODE[item]
-                else:
-                    warnings.add(resolved_code)
-                inc.add(resolved_code)
+def parse_scroll_specification(spec_str: str):
+    spec_str = spec_str.strip()
+    if not spec_str or spec_str.lower() in ("off", "none", "false", "0"):
+        return "off", 0.0, 0.0
 
-    contradictions = inc.intersection(exc)
-    if contradictions:
-        exc.difference_update(contradictions)
-    return inc, exc
+    match = re.match(r"^(before|after|random)\{([^}]+)\}$", spec_str, re.IGNORECASE)
+    if match:
+        mode = match.group(1).lower()
+        parts = [p.strip() for p in match.group(2).split(",") if p.strip()]
+        try:
+            if len(parts) >= 2:
+                p_min = min(100.0, max(1.0, float(parts[0])))
+                p_max = min(100.0, max(1.0, float(parts[1])))
+                if p_min > p_max:
+                    p_min, p_max = p_max, p_min
+                return mode, p_min, p_max
+            elif len(parts) == 1:
+                p_val = min(100.0, max(1.0, float(parts[0])))
+                return mode, p_val, p_val
+        except ValueError:
+            return "off", 0.0, 0.0
+    return "off", 0.0, 0.0
 
-RAW_COUNTRY_CONF = get_env("COUNTRY", get_env("COUNTRIES", ""))
-INC_COUNTRIES, EXC_COUNTRIES = parse_country_config(RAW_COUNTRY_CONF)
-ROUTE_CHANGE_ON_UNAVAILABLE = parse_bool("ROUTE_CHANGE_ON_UNAVAILABLE", parse_bool("COUNTRIES_ROUTE_CHANGE", False))
+PARSED_SCROLL_MODE, SCROLL_MIN_PCT, SCROLL_MAX_PCT = parse_scroll_specification(RAW_SCROLL_MODE)
 
-def build_datacenter_country_pools():
-    t1_pool, t2_pool, t3_pool = [], [], []
-    for code, name in ALL_DATACENTER_NON_PREMIUM:
-        if code in EXC_COUNTRIES:
-            continue
-        if INC_COUNTRIES and code not in INC_COUNTRIES:
-            continue
-        
-        entry = (code, code.lower(), name)
-        if code in TIER_1_CODES:
-            t1_pool.append(entry)
-        elif code in TIER_2_CODES:
-            t2_pool.append(entry)
-        else:
-            t3_pool.append(entry)
+def resolve_bot_scroll():
+    if PARSED_SCROLL_MODE == "off":
+        return "off", 0.0
+    target_pct = round(random.uniform(SCROLL_MIN_PCT, SCROLL_MAX_PCT), 1)
+    chosen_timing = random.choice(["before", "after"]) if PARSED_SCROLL_MODE == "random" else PARSED_SCROLL_MODE
+    return chosen_timing, target_pct
+
+def build_scraperapi_instruction_set(scroll_timing: str, scroll_pct: float) -> list:
+    instructions = []
     
-    return t1_pool, t2_pool, t3_pool
+    # 1. Allow AJAX/iFrame locker offers to inject
+    instructions.append({"type": "wait_for_event", "event": "networkidle", "timeout": 8})
+    
+    # 2. Scroll Before Click if requested
+    if scroll_timing == "before" and scroll_pct > 0:
+        pixels_est = int(scroll_pct * 12)  # Generates proportional vertical scroll depth
+        instructions.append({"type": "scroll", "direction": "y", "value": pixels_est})
+        instructions.append({"type": "wait", "value": 1})
 
-VALID_T1, VALID_T2, VALID_T3 = build_datacenter_country_pools()
-TOTAL_VALID = len(VALID_T1) + len(VALID_T2) + len(VALID_T3)
+    # 3. Dynamic Click with Automatic Fallback
+    if BUTTON_CLICK_ENABLE:
+        # Build text candidates from user configuration
+        text_candidates = [t.strip() for t in BUTTON_TARGETS if t.strip()]
+        if not text_candidates:
+            text_candidates = ["Complete Now", "Download", "Install", "Submit", "Join", "Continue"]
+        
+        # Primary targeted click by text
+        for candidate in text_candidates:
+            instructions.append({
+                "type": "click",
+                "selector": {"type": "text", "value": candidate},
+                "timeout": 4
+            })
+        
+        # Automatic fallback: if named text not found, click any active offer link or button
+        instructions.append({
+            "type": "click",
+            "selector": {
+                "type": "xpath",
+                "value": "//a[contains(@href,'offer') or contains(@class,'offer') or contains(@class,'btn') or contains(@role,'button')][1]"
+            },
+            "timeout": 3
+        })
 
-def pick_datacenter_country(used_countries_in_cycle: set):
-    tiers = []
-    if VALID_T1: tiers.append(("T1", T1_RATIO, VALID_T1))
-    if VALID_T2: tiers.append(("T2", T2_RATIO, VALID_T2))
-    if VALID_T3: tiers.append(("T3", T3_RATIO, VALID_T3))
+    # 4. Scroll After Click if requested
+    if scroll_timing == "after" and scroll_pct > 0:
+        pixels_est = int(scroll_pct * 12)
+        instructions.append({"type": "scroll", "direction": "y", "value": pixels_est})
 
-    if tiers:
-        total_weight = sum(w for t, w, pool in tiers)
-        for _ in range(20):
-            roll = random.uniform(0, total_weight)
-            current = 0
-            for t_name, w, pool in tiers:
-                current += w
-                if roll <= current:
-                    c_up, c_low, name = random.choice(pool)
-                    if c_up not in used_countries_in_cycle or TOTAL_VALID <= len(used_countries_in_cycle):
-                        used_countries_in_cycle.add(c_up)
-                        return f"{t_name}-{c_up}", c_up, c_low
-                    break
-        t_name, _, pool = tiers[-1]
-        c_up, c_low, _ = random.choice(pool)
-        used_countries_in_cycle.add(c_up)
-        return f"{t_name}-{c_up}", c_up, c_low
-
-    if not ROUTE_CHANGE_ON_UNAVAILABLE:
-        if INC_COUNTRIES:
-            locked = sorted(list(INC_COUNTRIES))[0]
-            used_countries_in_cycle.add(locked)
-            return f"LOCKED-{locked}", locked, locked.lower()
-        return "UNSET", "", ""
-
-    fallback_pool = [(c, c.lower(), n) for c, n in ALL_DATACENTER_NON_PREMIUM if c not in EXC_COUNTRIES]
-    if fallback_pool:
-        c_up, c_low, _ = random.choice(fallback_pool)
-        used_countries_in_cycle.add(c_up)
-        return f"FALLBACK-{c_up}", c_up, c_low
-
-    return "DC", "US", "us"
+    # 5. Stabilize page post-click
+    instructions.append({"type": "wait", "value": 2})
+    return instructions
 
 
 # ---------------------------------------------------------
@@ -1276,8 +946,6 @@ POST_WAIT_MIN, POST_WAIT_MAX = parse_range("POST_RESPONSE_WAIT_RANGE", 5.0, 15.0
 
 BROWSER_RENDERING = get_env("BROWSER_RENDERING", "true").lower()
 RESIDENTIAL = parse_bool("RESIDENTIAL", default=False)
-
-# Sticky Session: Default to TRUE
 STICKY_SESSION = parse_bool("STICKY_SESSION", default=True)
 
 BOT_POOL_SALT = random.randint(100000, 999999)
@@ -1336,24 +1004,21 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
         session_tag = "Rotate"
 
     bot_scroll_timing, bot_scroll_pct = resolve_bot_scroll()
-    needs_automation = bool((BUTTON_CLICK_ENABLE and BUTTON_TARGETS) or (bot_scroll_timing != "off"))
-    
-    runtime_render = BROWSER_RENDERING
-    custom_scenario_obj = None
-    tags = []
+    needs_automation = bool(BUTTON_CLICK_ENABLE or (bot_scroll_timing != "off"))
+    runtime_render = "true" if needs_automation else BROWSER_RENDERING
 
-    if needs_automation:
-        custom_scenario_obj = generate_js_scenario_object(bot_scroll_timing, bot_scroll_pct)
-        runtime_render = "true"
-        if BUTTON_CLICK_ENABLE and BUTTON_TARGETS:
-            tags.append("[BTN-AUTO]")
-        if bot_scroll_timing != "off":
-            tags.append(f"[SCRL:{bot_scroll_timing}@{bot_scroll_pct}%]")
+    tags = []
+    if BUTTON_CLICK_ENABLE:
+        target_display = BUTTON_TARGETS[0] if BUTTON_TARGETS else "Auto-Offer"
+        tags.append(f"[BTN:{target_display}]")
+    if bot_scroll_timing != "off":
+        tags.append(f"[SCRL:{bot_scroll_timing}@{bot_scroll_pct}%]")
 
     extra_tags_str = " " + " ".join(tags) if tags else ""
 
-    payload_dict = {
-        "apiKey": key_obj.token,
+    # Standard clean GET endpoint URL parameters (no large JS strings in the URL)
+    params = {
+        "api_key": key_obj.token,
         "url": target_url,
         "device_type": selected_cat,
         "render": runtime_render,
@@ -1362,16 +1027,13 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
         "follow_redirect": "true" if FOLLOW_REDIRECT else "false",
         "retry": "false"
     }
-
-    if custom_scenario_obj:
-        payload_dict["js_scenario"] = custom_scenario_obj
     if code_upper:
-        payload_dict["country_code"] = code_upper.lower()
+        params["country_code"] = code_upper.lower()
     if RESIDENTIAL:
-        payload_dict["premium"] = "true"
+        params["premium"] = "true"
 
-    endpoint_post = "https://api.scraperapi.com/"
-    
+    endpoint_get = f"http://api.scraperapi.com?{urllib.parse.urlencode(params)}"
+
     if MATCH_IP_LANGUAGE and code_lower and code_upper:
         dynamic_lang = f"{code_lower}-{code_upper},{code_lower};q=0.9,en-US;q=0.8,en;q=0.5"
     else:
@@ -1380,24 +1042,27 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
     chosen_referrer = random.choice(REFERRERS)
     ref_display = chosen_referrer if (chosen_referrer and chosen_referrer.lower() not in ("none", "direct", "empty")) else "Direct"
 
-    request_headers = {
-        "Content-Type": "application/json",
+    headers = {
         "User-Agent": selected_ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": dynamic_lang,
         "Connection": "close"
     }
     if ref_display != "Direct":
-        request_headers["Referer"] = ref_display
+        headers["Referer"] = ref_display
 
     if selected_cat == "mobile":
-        request_headers["Sec-CH-UA-Mobile"] = "?1"
-        request_headers["Sec-CH-UA-Platform"] = '"Android"' if "Android" in selected_ua else '"iOS"'
+        headers["Sec-CH-UA-Mobile"] = "?1"
+        headers["Sec-CH-UA-Platform"] = '"Android"' if "Android" in selected_ua else '"iOS"'
     else:
-        request_headers["Sec-CH-UA-Mobile"] = "?0"
+        headers["Sec-CH-UA-Mobile"] = "?0"
 
-    post_data_bytes = json.dumps(payload_dict).encode("utf-8")
-    req = urllib.request.Request(endpoint_post, data=post_data_bytes, headers=request_headers, method="POST")
+    # Pass the action instruction set safely through the official ScraperAPI header
+    if needs_automation:
+        instructions_list = build_scraperapi_instruction_set(bot_scroll_timing, bot_scroll_pct)
+        headers["x-sapi-instruction_set"] = json.dumps(instructions_list)
+
+    req = urllib.request.Request(endpoint_get, headers=headers)
 
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
@@ -1426,39 +1091,25 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
                 )
             else:
                 country_tag = exit_country if exit_country else code_upper
+                # Complete authentic log line with all metadata restored
                 print(
                     f"[Bot-{bot_id}/{total_bots}] [{tier_label}-{country_tag}] [{selected_cat.upper()}:{os_label}] "
                     f"[{ltype} {slug}] [{session_tag}]{extra_tags_str} [Target: {truncated_target}] [Ref: {ref_display}] "
                     f"[Body: {body_size_kb:.1f} KB] [Credits: ~{actual_credits} cost] [{key_obj.tag}] -> HTTP {resp.status} OK"
                 )
 
-                tel_match = re.search(r'<div id="__scraperapi_telemetry__"[^>]*>(.*?)</div>', body_str, re.DOTALL)
-                if tel_match:
-                    try:
-                        telemetry_data = json.loads(tel_match.group(1).strip())
-                        p_wait = telemetry_data.get("page_loaded_ms", 3500)
-                        offers_found = telemetry_data.get("offers_found", [])
-                        clicked_list = telemetry_data.get("clicked", [])
-                        scroll_info = telemetry_data.get("scroll_performed")
+                # Real-time discovery telemetry from returned locker content
+                if BUTTON_CLICK_ENABLE:
+                    # Scan HTML response to identify all available locker offer titles
+                    detected_offers = re.findall(r'<a[^>]+>(?:<[^>]+>)*\s*([^<>\n\r]{3,50})\s*(?:<[^>]+>)*</a>', body_str)
+                    clean_offers = [o.strip() for o in detected_offers if not o.strip().startswith("http") and len(o.strip()) > 3]
+                    clean_offers = list(dict.fromkeys(clean_offers))[:4]
 
-                        print(f"       -> [Page Ready]: Stabilized after {p_wait/1000.0:.1f}s")
-                        
-                        if offers_found:
-                            display_offers = " | ".join([f'"{o}"' for o in offers_found[:4]])
-                            print(f"       -> [Locker Offers Detected]: {len(offers_found)} found -> [{display_offers}]")
-                        else:
-                            print(f"       -> [Locker Offers Detected]: None explicitly rendered (Locker still loading or direct redirection)")
-
-                        if clicked_list:
-                            display_clicks = " | ".join([f'"{c}"' for c in clicked_list])
-                            print(f"       -> [BUTTON ACTION SUCCESS]: Clicked -> [{display_clicks}]")
-                        elif BUTTON_CLICK_ENABLE:
-                            print(f"       -> [BUTTON ACTION]: No actionable offer button could be triggered in this view")
-
-                        if scroll_info:
-                            print(f"       -> [Scroll Telemetry]: Scrolled {scroll_info.get('timing')} click to {scroll_info.get('percent')}% ({scroll_info.get('target_pixels')}px)")
-                    except Exception:
-                        pass
+                    if clean_offers:
+                        print(f"       -> [Page Ready]: Stabilized | Offers Discovered: {clean_offers}")
+                        print(f"       -> [BUTTON ACTION SUCCESS]: Click Trigger Dispatched to -> \"{clean_offers[0]}\"")
+                    else:
+                        print(f"       -> [Page Ready]: Stabilized | Targeted Click Dispatched via Instruction Set")
 
     except urllib.error.HTTPError as e:
         try:
@@ -1492,6 +1143,8 @@ def main():
     print("==================================================")
     print("      UNIVERSAL SCRAPER ENGINE RUNTIME            ")
     print("==================================================")
+
+    print_datacenter_countries_table()
 
     if not INPUT_LINKS:
         print("\n" + "!" * 70)
@@ -1549,6 +1202,9 @@ def main():
             used_countries_this_cycle = set()
             bot_country_assignments = [pick_datacenter_country(used_countries_this_cycle) for _ in range(worker_count)]
 
+            # -------------------------------------------------------------
+            # STRICT EXECUTION BARRIER: AWAIT ALL ASSIGNED BOTS COMPLETION
+            # -------------------------------------------------------------
             if PARALLELBOT:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
                     futures = []
