@@ -300,7 +300,7 @@ LINUX_FF_HIGH = [
 ]
 LINUX_FF_MID = [
     "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:138.0) Gecko/20100101 Firefox/138.0",
-    "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:136.0) Gecko/20100101 Firefox/136.0",
     "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0",
 ]
 LINUX_FF_LOW = [
@@ -436,6 +436,10 @@ ANDROID_OPERA_ALL = [
     "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36 OPR/75.0.0.0",
 ]
 
+
+# ---------------------------------------------------------
+# Dynamic Sampling (65% High, 25% Mid, 10% Low)
+# ---------------------------------------------------------
 def sample_weighted_browser(high_list, mid_list, low_list):
     roll = random.random()
     if roll < 0.65 and high_list:
@@ -447,8 +451,14 @@ def sample_weighted_browser(high_list, mid_list, low_list):
     combined = high_list + mid_list + low_list
     return random.choice(combined) if combined else ""
 
+
+# ---------------------------------------------------------
+# Deterministic AST Parser for DEVICE_TYPE Hierarchy
+# ---------------------------------------------------------
 def tokenize_balanced_blocks(s: str) -> list:
-    tokens, depth, buf = [], 0, []
+    tokens = []
+    depth = 0
+    buf = []
     for ch in s:
         if ch == '{':
             depth += 1
@@ -533,6 +543,10 @@ RAW_DEVICE_SPEC = get_env("DEVICE_TYPE", "desktop,mobile")
 DEVICE_TREE = parse_nested_device_spec(RAW_DEVICE_SPEC)
 NATIVE_RATIO = parse_native_ratio("BROWSER_NATIVE_RATIO", default_pct=80.0)
 
+
+# ---------------------------------------------------------
+# Custom User-Agent Validator
+# ---------------------------------------------------------
 def validate_ua_entries(uas: list, expected_scope: str):
     desktop_signatures = ["windows nt", "macintosh", "x11; linux x86_64", "fedora", "ubuntu"]
     mobile_signatures = ["mobile", "android", "iphone", "ipad", "crios", "fxios"]
@@ -562,6 +576,7 @@ def validate_ua_entries(uas: list, expected_scope: str):
                 print("#" * 70 + "\n")
                 sys.exit(1)
 
+
 CUSTOM_DESKTOP_UAS = parse_list("DESKTOP_USER_AGENTS", [])
 CUSTOM_MOBILE_UAS = parse_list("MOBILE_USER_AGENTS", [])
 
@@ -570,6 +585,10 @@ if CUSTOM_DESKTOP_UAS:
 if CUSTOM_MOBILE_UAS:
     validate_ua_entries(CUSTOM_MOBILE_UAS, "mobile")
 
+
+# ---------------------------------------------------------
+# Native Browser Weighted Resolver
+# ---------------------------------------------------------
 NATIVE_BROWSER_MAP = {
     "ios": "safari",
     "android": "chrome",
@@ -584,6 +603,7 @@ def pick_browser_for_os(os_name: str, allowed_browsers: list, native_pct: float)
         return allowed_browsers[0]
 
     native_name = NATIVE_BROWSER_MAP.get(os_name, "")
+    
     if native_name and native_name in allowed_browsers:
         other_browsers = [b for b in allowed_browsers if b != native_name]
         if other_browsers and random.random() < native_pct:
@@ -594,6 +614,10 @@ def pick_browser_for_os(os_name: str, allowed_browsers: list, native_pct: float)
 
     return random.choice(allowed_browsers)
 
+
+# ---------------------------------------------------------
+# Isolated UA Resolver (Strict Category Guarantees)
+# ---------------------------------------------------------
 def get_ua_for_selection(category: str, os_name: str, browser: str) -> tuple:
     if category == "mobile" and CUSTOM_MOBILE_UAS:
         return random.choice(CUSTOM_MOBILE_UAS), "Custom:Mobile"
@@ -659,6 +683,7 @@ def get_ua_for_selection(category: str, os_name: str, browser: str) -> tuple:
 
     return sample_weighted_browser(WIN_CHROME_HIGH, WIN_CHROME_MID, WIN_CHROME_LOW), "Win:Chrome"
 
+
 def resolve_cycle_ua(used_uas_in_cycle: set) -> tuple:
     cats = list(DEVICE_TREE.keys())
     cat = random.choice(cats) if cats else "mobile"
@@ -682,195 +707,175 @@ def resolve_cycle_ua(used_uas_in_cycle: set) -> tuple:
     return cat, ua, label
 
 
-# =========================================================
-# ADVANCED INSTRUCTION SET (ScraperAPI Official Standard)
-# =========================================================
-
-BUTTON_CLICK_ENABLE = parse_bool("BUTTON_CLICK_ENABLE", default=False)
-BUTTON_TARGETS = parse_list("BUTTON_TARGETS", [])
-BUTTON_SELECTION_MODE = get_env("BUTTON_SELECTION_MODE", "first").lower()
-BUTTON_CLICK_COUNT = get_env("BUTTON_CLICK_COUNT", "1").strip().lower()
-BUTTON_PAGE_LOAD_WAIT = get_env("BUTTON_PAGE_LOAD_WAIT", "fully_loaded").strip().lower()
-
-BUTTON_L2_CLICK_ENABLE = parse_bool("BUTTON_L2_CLICK_ENABLE", default=False)
-BUTTON_L2_TARGETS = parse_list("BUTTON_L2_TARGETS", [])
-BUTTON_L2_SELECTION_MODE = get_env("BUTTON_L2_SELECTION_MODE", "first").lower()
-BUTTON_L2_CLICK_COUNT = get_env("BUTTON_L2_CLICK_COUNT", "1").strip().lower()
-L2_DELAY_MIN, L2_DELAY_MAX = parse_range("BUTTON_L2_DELAY_RANGE", 2.0, 4.0)
-
-RAW_SCROLL_MODE = get_env("SCROLL_MODE", "off").strip()
-
-def parse_scroll_specification(spec_str: str):
-    spec_str = spec_str.strip()
-    if not spec_str or spec_str.lower() in ("off", "none", "false", "0"):
-        return "off", 0.0, 0.0
-
-    match = re.match(r"^(before|after|random)\{([^}]+)\}$", spec_str, re.IGNORECASE)
-    if match:
-        mode = match.group(1).lower()
-        parts = [p.strip() for p in match.group(2).split(",") if p.strip()]
-        try:
-            if len(parts) >= 2:
-                p_min = min(100.0, max(1.0, float(parts[0])))
-                p_max = min(100.0, max(1.0, float(parts[1])))
-                if p_min > p_max:
-                    p_min, p_max = p_max, p_min
-                return mode, p_min, p_max
-            elif len(parts) == 1:
-                p_val = min(100.0, max(1.0, float(parts[0])))
-                return mode, p_val, p_val
-        except ValueError:
-            return "off", 0.0, 0.0
-    return "off", 0.0, 0.0
-
-PARSED_SCROLL_MODE, SCROLL_MIN_PCT, SCROLL_MAX_PCT = parse_scroll_specification(RAW_SCROLL_MODE)
-
-def resolve_bot_scroll():
-    if PARSED_SCROLL_MODE == "off":
-        return "off", 0.0
-    target_pct = round(random.uniform(SCROLL_MIN_PCT, SCROLL_MAX_PCT), 1)
-    chosen_timing = random.choice(["before", "after"]) if PARSED_SCROLL_MODE == "random" else PARSED_SCROLL_MODE
-    return chosen_timing, target_pct
-
-def build_scraperapi_instruction_set(scroll_timing: str, scroll_pct: float) -> list:
-    instructions = []
-    
-    # 1. Allow AJAX/iFrame locker offers to inject
-    instructions.append({"type": "wait_for_event", "event": "networkidle", "timeout": 8})
-    
-    # 2. Scroll Before Click if requested
-    if scroll_timing == "before" and scroll_pct > 0:
-        pixels_est = int(scroll_pct * 12)  # Generates proportional vertical scroll depth
-        instructions.append({"type": "scroll", "direction": "y", "value": pixels_est})
-        instructions.append({"type": "wait", "value": 1})
-
-    # 3. Dynamic Click with Automatic Fallback
-    if BUTTON_CLICK_ENABLE:
-        # Build text candidates from user configuration
-        text_candidates = [t.strip() for t in BUTTON_TARGETS if t.strip()]
-        if not text_candidates:
-            text_candidates = ["Complete Now", "Download", "Install", "Submit", "Join", "Continue"]
-        
-        # Primary targeted click by text
-        for candidate in text_candidates:
-            instructions.append({
-                "type": "click",
-                "selector": {"type": "text", "value": candidate},
-                "timeout": 4
-            })
-        
-        # Automatic fallback: if named text not found, click any active offer link or button
-        instructions.append({
-            "type": "click",
-            "selector": {
-                "type": "xpath",
-                "value": "//a[contains(@href,'offer') or contains(@class,'offer') or contains(@class,'btn') or contains(@role,'button')][1]"
-            },
-            "timeout": 3
-        })
-
-    # 4. Scroll After Click if requested
-    if scroll_timing == "after" and scroll_pct > 0:
-        pixels_est = int(scroll_pct * 12)
-        instructions.append({"type": "scroll", "direction": "y", "value": pixels_est})
-
-    # 5. Stabilize page post-click
-    instructions.append({"type": "wait", "value": 2})
-    return instructions
-
-
 # ---------------------------------------------------------
-# Dynamic Slug & Link Engine
+# Full Datacenter Catalog & 3-Tier Classification
 # ---------------------------------------------------------
-class CycleLinkDispatcher:
-    def __init__(self, raw_links: list, short_template: str):
-        self.raw_links = raw_links
-        self.short_template = short_template
-        self.full_links = []
-        self.explicit_short_links = []
-        self._categorize()
+ALL_DATACENTER_NON_PREMIUM = [
+    ("AE", "United Arab Emirates"), ("AR", "Argentina"), ("AT", "Austria"),
+    ("AU", "Australia"), ("BE", "Belgium"), ("BG", "Bulgaria"),
+    ("BR", "Brazil"), ("CA", "Canada"), ("CH", "Switzerland"),
+    ("CL", "Chile"), ("CO", "Colombia"), ("CZ", "Czech Republic"),
+    ("DE", "Germany"), ("DK", "Denmark"), ("ES", "Spain"),
+    ("FI", "Finland"), ("FR", "France"), ("GB", "United Kingdom"),
+    ("GR", "Greece"), ("HK", "Hong Kong"), ("HR", "Croatia"),
+    ("HU", "Hungary"), ("ID", "Indonesia"), ("IE", "Ireland"),
+    ("IL", "Israel"), ("IN", "India"), ("IT", "Italy"),
+    ("JP", "Japan"), ("KR", "South Korea"), ("MX", "Mexico"),
+    ("MY", "Malaysia"), ("NL", "Netherlands"), ("NO", "Norway"),
+    ("NZ", "New Zealand"), ("PH", "Philippines"), ("PL", "Poland"),
+    ("PT", "Portugal"), ("RO", "Romania"), ("RS", "Serbia"),
+    ("SA", "Saudi Arabia"), ("SE", "Sweden"), ("SG", "Singapore"),
+    ("SK", "Slovakia"), ("TH", "Thailand"), ("TR", "Turkey"),
+    ("TW", "Taiwan"), ("UA", "Ukraine"), ("US", "United States"),
+    ("VN", "Vietnam"), ("ZA", "South Africa")
+]
+ALL_DATACENTER_NON_PREMIUM = sorted(ALL_DATACENTER_NON_PREMIUM, key=lambda x: x[1])
 
-    def _categorize(self):
-        for item in self.raw_links:
-            item = item.strip()
-            if not item:
-                continue
+DATACENTER_CODE_TO_NAME = {code.upper(): name for code, name in ALL_DATACENTER_NON_PREMIUM}
+DATACENTER_NAME_TO_CODE = {name.lower(): code.upper() for code, name in ALL_DATACENTER_NON_PREMIUM}
 
-            parsed = urllib.parse.urlparse(item)
-            is_url = bool(parsed.scheme and parsed.netloc)
-            slug = None
+TIER_1_CODES = {"US", "GB", "CA", "DE", "FR", "ES", "IT", "NL", "JP", "SG", "AU", "SE", "MX", "BR", "KR"}
+TIER_2_CODES = {"AE", "AR", "AT", "BE", "CH", "CL", "CO", "CZ", "DK", "FI", "HK", "IE", "IL", "IN", "NO", "NZ", "PL", "PT", "RO", "SA", "TR", "TW", "ZA"}
+TIER_3_CODES = {"BG", "GR", "HR", "HU", "ID", "MY", "PH", "RS", "SK", "TH", "UA", "VN"}
 
-            if is_url:
-                query = urllib.parse.parse_qs(parsed.query)
-                for param in ("via", "ref", "r", "referral", "aff", "code", "id", "tag"):
-                    if param in query and query[param]:
-                        slug = query[param][0]
-                        break
-                if not slug:
-                    path_parts = [p for p in parsed.path.split("/") if p]
-                    if path_parts:
-                        slug = path_parts[-1]
+def print_datacenter_countries_table():
+    print("+" + "-" * 76 + "+")
+    print(f"| {'ALL AVAILABLE DATACENTER COUNTRIES (FREE CREDIT)':^74} |")
+    print("+" + "-" * 37 + "+" + "-" * 38 + "+")
+    print(f"| {'Code  Full Name':<36} | {'Code  Full Name':<37} |")
+    print("+" + "-" * 37 + "+" + "-" * 38 + "+")
 
-                if not parsed.query and slug and self.short_template and self.short_template in item:
-                    self.explicit_short_links.append((item, slug))
+    half = (len(ALL_DATACENTER_NON_PREMIUM) + 1) // 2
+    for i in range(half):
+        c1_code, c1_name = ALL_DATACENTER_NON_PREMIUM[i]
+        c1_str = f"[{c1_code}] {c1_name}"
+        if i + half < len(ALL_DATACENTER_NON_PREMIUM):
+            c2_code, c2_name = ALL_DATACENTER_NON_PREMIUM[i + half]
+            c2_str = f"[{c2_code}] {c2_name}"
+        else:
+            c2_str = ""
+        print(f"| {c1_str:<35} | {c2_str:<36} |")
+    print("+" + "-" * 76 + "+\n")
+
+def parse_country_config(raw_cfg: str):
+    inc = set()
+    exc = set()
+    warnings = set()
+    if not raw_cfg.strip():
+        return inc, exc
+
+    tokens = [t.strip() for t in re.split(r",(?![^{]*\})", raw_cfg) if t.strip()]
+    for token in tokens:
+        match = re.match(r"^(include|exclude)\{([^\}]+)\}$", token, re.IGNORECASE)
+        if match:
+            mode = match.group(1).lower()
+            items = [c.strip().lower() for c in match.group(2).split(",") if c.strip()]
+            for item in items:
+                resolved_code = item.upper()
+                if item.upper() in DATACENTER_CODE_TO_NAME:
+                    resolved_code = item.upper()
+                elif item in DATACENTER_NAME_TO_CODE:
+                    resolved_code = DATACENTER_NAME_TO_CODE[item]
                 else:
-                    self.full_links.append((item, slug if slug else "link"))
-            else:
-                self.full_links.append((item, item))
+                    warnings.add(resolved_code)
 
-    def generate_cycle_batch(self, worker_count: int):
-        used_slugs, used_urls, tasks = set(), set(), []
-        pool = []
-        for url, sl in self.full_links:
-            pool.append(("FULL", url, sl))
-        for url, sl in self.explicit_short_links:
-            pool.append(("SHORT_CUSTOM", url, sl))
-
-        random.shuffle(pool)
-
-        def make_short_url(slug: str, reference: str) -> str:
-            if not reference:
-                return ""
-            if "{slug}" in reference:
-                return reference.replace("{slug}", slug)
-            parsed = urllib.parse.urlparse(reference)
-            base_domain = f"{parsed.scheme}://{parsed.netloc}"
-            parts = [p for p in parsed.path.split("/") if p]
-            if len(parts) > 1:
-                prefix = "/".join(parts[:-1])
-                return f"{base_domain}/{prefix}/{slug}"
-            return f"{base_domain}/{slug}"
-
-        for kind, raw_target, slug in pool:
-            if len(tasks) >= worker_count:
-                break
-            if len(pool) >= worker_count:
-                if slug in used_slugs or raw_target in used_urls:
-                    continue
-
-            final_url = raw_target
-            ltype = "DIRECT"
-
-            if kind == "SHORT_CUSTOM":
-                ltype = "SHORT (OWN)"
-            elif self.short_template and slug:
-                roll = random.random()
-                short_cand = make_short_url(slug, self.short_template)
-                if roll >= 0.86 and short_cand:
-                    final_url = short_cand
-                    ltype = "SHORT (/)"
+                if mode == "include":
+                    inc.add(resolved_code)
                 else:
-                    ltype = "FULL (?)"
+                    exc.add(resolved_code)
+        else:
+            items = [c.strip().lower() for c in token.split(",") if c.strip()]
+            for item in items:
+                resolved_code = item.upper()
+                if item.upper() in DATACENTER_CODE_TO_NAME:
+                    resolved_code = item.upper()
+                elif item in DATACENTER_NAME_TO_CODE:
+                    resolved_code = DATACENTER_NAME_TO_CODE[item]
+                else:
+                    warnings.add(resolved_code)
+                
+                inc.add(resolved_code)
 
-            used_slugs.add(slug)
-            used_urls.add(final_url)
-            tasks.append((final_url, slug, ltype))
+    contradictions = inc.intersection(exc)
+    if contradictions:
+        print("\n" + "=" * 70)
+        print(" [PINNED AUDIT ALERT] COUNTRY CONTRADICTION DETECTED!")
+        print(f" Overlapping countries in include & exclude: {sorted(list(contradictions))}")
+        print(" Included countries take precedence.")
+        print("=" * 70 + "\n")
+        exc.difference_update(contradictions)
 
-        while len(tasks) < worker_count and pool:
-            kind, raw_target, slug = random.choice(pool)
-            tasks.append((raw_target, slug, kind))
+    if warnings:
+        print("\n" + "!" * 70)
+        print(f" [WARNING] Unrecognized codes in config: {', '.join(sorted(list(warnings)))}")
+        print("!" * 70 + "\n")
 
-        return tasks
+    return inc, exc
+
+RAW_COUNTRY_CONF = get_env("COUNTRY", get_env("COUNTRIES", ""))
+INC_COUNTRIES, EXC_COUNTRIES = parse_country_config(RAW_COUNTRY_CONF)
+ROUTE_CHANGE_ON_UNAVAILABLE = parse_bool("ROUTE_CHANGE_ON_UNAVAILABLE", parse_bool("COUNTRIES_ROUTE_CHANGE", False))
+
+def build_datacenter_country_pools():
+    t1_pool, t2_pool, t3_pool = [], [], []
+    for code, name in ALL_DATACENTER_NON_PREMIUM:
+        if code in EXC_COUNTRIES:
+            continue
+        if INC_COUNTRIES and code not in INC_COUNTRIES:
+            continue
+        
+        entry = (code, code.lower(), name)
+        if code in TIER_1_CODES:
+            t1_pool.append(entry)
+        elif code in TIER_2_CODES:
+            t2_pool.append(entry)
+        else:
+            t3_pool.append(entry)
+    
+    return t1_pool, t2_pool, t3_pool
+
+VALID_T1, VALID_T2, VALID_T3 = build_datacenter_country_pools()
+TOTAL_VALID = len(VALID_T1) + len(VALID_T2) + len(VALID_T3)
+
+def pick_datacenter_country(used_countries_in_cycle: set):
+    tiers = []
+    if VALID_T1: tiers.append(("T1", T1_RATIO, VALID_T1))
+    if VALID_T2: tiers.append(("T2", T2_RATIO, VALID_T2))
+    if VALID_T3: tiers.append(("T3", T3_RATIO, VALID_T3))
+
+    if tiers:
+        total_weight = sum(w for t, w, pool in tiers)
+        for _ in range(20):
+            roll = random.uniform(0, total_weight)
+            current = 0
+            for t_name, w, pool in tiers:
+                current += w
+                if roll <= current:
+                    c_up, c_low, name = random.choice(pool)
+                    if c_up not in used_countries_in_cycle or TOTAL_VALID <= len(used_countries_in_cycle):
+                        used_countries_in_cycle.add(c_up)
+                        return f"{t_name}-{c_up}", c_up, c_low
+                    break
+        
+        t_name, _, pool = tiers[-1]
+        c_up, c_low, _ = random.choice(pool)
+        used_countries_in_cycle.add(c_up)
+        return f"{t_name}-{c_up}", c_up, c_low
+
+    if not ROUTE_CHANGE_ON_UNAVAILABLE:
+        if INC_COUNTRIES:
+            locked = sorted(list(INC_COUNTRIES))[0]
+            used_countries_in_cycle.add(locked)
+            return f"LOCKED-{locked}", locked, locked.lower()
+        return "UNSET", "", ""
+
+    fallback_pool = [(c, c.lower(), n) for c, n in ALL_DATACENTER_NON_PREMIUM if c not in EXC_COUNTRIES]
+    if fallback_pool:
+        c_up, c_low, _ = random.choice(fallback_pool)
+        used_countries_in_cycle.add(c_up)
+        return f"FALLBACK-{c_up}", c_up, c_low
+
+    return "DC", "US", "us"
 
 
 # ---------------------------------------------------------
@@ -1016,7 +1021,6 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
 
     extra_tags_str = " " + " ".join(tags) if tags else ""
 
-    # Standard clean GET endpoint URL parameters (no large JS strings in the URL)
     params = {
         "api_key": key_obj.token,
         "url": target_url,
@@ -1057,7 +1061,7 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
     else:
         headers["Sec-CH-UA-Mobile"] = "?0"
 
-    # Pass the action instruction set safely through the official ScraperAPI header
+    # Pass the action instruction set through the header
     if needs_automation:
         instructions_list = build_scraperapi_instruction_set(bot_scroll_timing, bot_scroll_pct)
         headers["x-sapi-instruction_set"] = json.dumps(instructions_list)
@@ -1091,16 +1095,13 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
                 )
             else:
                 country_tag = exit_country if exit_country else code_upper
-                # Complete authentic log line with all metadata restored
                 print(
                     f"[Bot-{bot_id}/{total_bots}] [{tier_label}-{country_tag}] [{selected_cat.upper()}:{os_label}] "
                     f"[{ltype} {slug}] [{session_tag}]{extra_tags_str} [Target: {truncated_target}] [Ref: {ref_display}] "
                     f"[Body: {body_size_kb:.1f} KB] [Credits: ~{actual_credits} cost] [{key_obj.tag}] -> HTTP {resp.status} OK"
                 )
 
-                # Real-time discovery telemetry from returned locker content
                 if BUTTON_CLICK_ENABLE:
-                    # Scan HTML response to identify all available locker offer titles
                     detected_offers = re.findall(r'<a[^>]+>(?:<[^>]+>)*\s*([^<>\n\r]{3,50})\s*(?:<[^>]+>)*</a>', body_str)
                     clean_offers = [o.strip() for o in detected_offers if not o.strip().startswith("http") and len(o.strip()) > 3]
                     clean_offers = list(dict.fromkeys(clean_offers))[:4]
