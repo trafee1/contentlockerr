@@ -183,7 +183,7 @@ def resolve_target_click_count(count_setting: str) -> str:
 
 def resolve_initial_wait_ms(wait_setting: str) -> int:
     if wait_setting in ("fully_loaded", "default", "load", ""):
-        return 3000
+        return 3500
     if "," in wait_setting:
         parts = [p.strip() for p in wait_setting.split(",") if p.strip()]
         try:
@@ -191,13 +191,13 @@ def resolve_initial_wait_ms(wait_setting: str) -> int:
             w_max = float(parts[1]) if len(parts) >= 2 else w_min
             return int(random.uniform(w_min, w_max) * 1000)
         except ValueError:
-            return 3000
+            return 3500
     try:
         return int(float(wait_setting) * 1000)
     except ValueError:
-        return 3000
+        return 3500
 
-def generate_js_scenario_json(scroll_timing: str, scroll_pct: float) -> str:
+def generate_js_scenario_object(scroll_timing: str, scroll_pct: float) -> dict:
     l1_patterns = [parse_target_pattern(t) for t in BUTTON_TARGETS if t.strip()]
     l1_count_str = resolve_target_click_count(BUTTON_CLICK_COUNT)
     l1_wait_ms = resolve_initial_wait_ms(BUTTON_PAGE_LOAD_WAIT)
@@ -211,7 +211,6 @@ def generate_js_scenario_json(scroll_timing: str, scroll_pct: float) -> str:
     l2_patterns_json = json.dumps(l2_patterns)
     has_buttons = bool(BUTTON_CLICK_ENABLE)
 
-    # Injected browser script compiles telemetry directly into #__scraperapi_telemetry__
     js_evaluate = f"""(async function() {{
         const telemetry = {{
             page_loaded_ms: {l1_wait_ms},
@@ -269,7 +268,6 @@ def generate_js_scenario_json(scroll_timing: str, scroll_pct: float) -> str:
             const allAvailableTitles = [];
             const matched = [];
 
-            // Pattern Match
             if (patterns && patterns.length > 0) {{
                 for (const pat of patterns) {{
                     const targetText = pat.text.trim().toLowerCase();
@@ -280,13 +278,13 @@ def generate_js_scenario_json(scroll_timing: str, scroll_pct: float) -> str:
                             const lowerText = rawText.toLowerCase();
                             if (!lowerText) continue;
 
-                            if (rawText.length > 1 and rawText.length < 80 and !allAvailableTitles.includes(rawText)) {{
+                            if (rawText.length > 1 && rawText.length < 80 && !allAvailableTitles.includes(rawText)) {{
                                 allAvailableTitles.push(rawText);
                             }}
 
                             if (lowerText.includes(targetText)) {{
                                 let clickable = el.closest('a, button, [role="button"], input[type="submit"]') || el;
-                                if (!matched.includes(clickable)) {{
+                                if (!matched.some(m => m.element === clickable)) {{
                                     matched.push({{ element: clickable, title: rawText }});
                                 }}
                             }}
@@ -296,7 +294,6 @@ def generate_js_scenario_json(scroll_timing: str, scroll_pct: float) -> str:
                 }}
             }}
 
-            // Automatic Fallback: Auto-detect any locker offers on page
             if (matched.length === 0) {{
                 for (const root of roots) {{
                     const offerElements = Array.from(root.querySelectorAll('a[href*="offer"], a[href*="click"], a[href*="target"], .offer, .offer_item, .locker_item, li.offer, div.offer, a.btn, a.button, a[href]'));
@@ -380,7 +377,6 @@ def generate_js_scenario_json(scroll_timing: str, scroll_pct: float) -> str:
             await performSmoothScroll({scroll_pct});
         }}
 
-        // Write telemetry element into DOM for python retrieval
         try {{
             const telNode = document.createElement('div');
             telNode.id = '__scraperapi_telemetry__';
@@ -390,14 +386,12 @@ def generate_js_scenario_json(scroll_timing: str, scroll_pct: float) -> str:
         }} catch(e) {{}}
     }})();"""
 
-    # Format according to official ScraperAPI scenario protocol
-    scenario_payload = {
+    return {
         "instructions": [
             {"wait_for": "body"},
             {"evaluate": js_evaluate}
         ]
     }
-    return json.dumps(scenario_payload)
 
 
 # =========================================================
@@ -600,9 +594,9 @@ LINUX_FF_MID = [
     "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0",
 ]
 LINUX_FF_LOW = [
-    "Mozilla/5.0 (X11; Linux x86_64; rv:132.0) Gecko/20100101 Firefox/132.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0",
-    "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 ]
 LINUX_OPERA_ALL = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36 OPR/114.0.0.0",
@@ -1345,11 +1339,11 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
     needs_automation = bool((BUTTON_CLICK_ENABLE and BUTTON_TARGETS) or (bot_scroll_timing != "off"))
     
     runtime_render = BROWSER_RENDERING
-    custom_scenario_json = ""
+    custom_scenario_obj = None
     tags = []
 
     if needs_automation:
-        custom_scenario_json = generate_js_scenario_json(bot_scroll_timing, bot_scroll_pct)
+        custom_scenario_obj = generate_js_scenario_object(bot_scroll_timing, bot_scroll_pct)
         runtime_render = "true"
         if BUTTON_CLICK_ENABLE and BUTTON_TARGETS:
             tags.append("[BTN-AUTO]")
@@ -1358,51 +1352,52 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
 
     extra_tags_str = " " + " ".join(tags) if tags else ""
 
-    params = {
-        "api_key": key_obj.token,
+    payload_dict = {
+        "apiKey": key_obj.token,
+        "url": target_url,
         "device_type": selected_cat,
         "render": runtime_render,
         "keep_headers": "true",
         "session_number": session_id,
         "follow_redirect": "true" if FOLLOW_REDIRECT else "false",
-        "retry": "false",
-        "url": target_url
+        "retry": "false"
     }
-    if custom_scenario_json:
-        params["js_scenario"] = custom_scenario_json
-    if code_upper:
-        params["country_code"] = code_upper.lower()
-    if RESIDENTIAL:
-        params["premium"] = "true"
 
-    url = f"http://api.scraperapi.com?{urllib.parse.urlencode(params)}"
+    if custom_scenario_obj:
+        payload_dict["js_scenario"] = custom_scenario_obj
+    if code_upper:
+        payload_dict["country_code"] = code_upper.lower()
+    if RESIDENTIAL:
+        payload_dict["premium"] = "true"
+
+    endpoint_post = "https://api.scraperapi.com/"
     
     if MATCH_IP_LANGUAGE and code_lower and code_upper:
         dynamic_lang = f"{code_lower}-{code_upper},{code_lower};q=0.9,en-US;q=0.8,en;q=0.5"
     else:
         dynamic_lang = "en-US,en;q=0.9"
 
-    headers = {
+    chosen_referrer = random.choice(REFERRERS)
+    ref_display = chosen_referrer if (chosen_referrer and chosen_referrer.lower() not in ("none", "direct", "empty")) else "Direct"
+
+    request_headers = {
+        "Content-Type": "application/json",
         "User-Agent": selected_ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": dynamic_lang,
         "Connection": "close"
     }
-    
+    if ref_display != "Direct":
+        request_headers["Referer"] = ref_display
+
     if selected_cat == "mobile":
-        headers["Sec-CH-UA-Mobile"] = "?1"
-        headers["Sec-CH-UA-Platform"] = '"Android"' if "Android" in selected_ua else '"iOS"'
+        request_headers["Sec-CH-UA-Mobile"] = "?1"
+        request_headers["Sec-CH-UA-Platform"] = '"Android"' if "Android" in selected_ua else '"iOS"'
     else:
-        headers["Sec-CH-UA-Mobile"] = "?0"
+        request_headers["Sec-CH-UA-Mobile"] = "?0"
 
-    chosen_referrer = random.choice(REFERRERS)
-    if chosen_referrer and chosen_referrer.lower() not in ("none", "direct", "empty"):
-        headers["Referer"] = chosen_referrer
-        ref_display = chosen_referrer
-    else:
-        ref_display = "Direct"
-
-    req = urllib.request.Request(url, headers=headers)
+    post_data_bytes = json.dumps(payload_dict).encode("utf-8")
+    req = urllib.request.Request(endpoint_post, data=post_data_bytes, headers=request_headers, method="POST")
 
     try:
         with urllib.request.urlopen(req, timeout=180) as resp:
@@ -1437,12 +1432,11 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
                     f"[Body: {body_size_kb:.1f} KB] [Credits: ~{actual_credits} cost] [{key_obj.tag}] -> HTTP {resp.status} OK"
                 )
 
-                # Parse and print real-time telemetry from remote headless Chromium execution
                 tel_match = re.search(r'<div id="__scraperapi_telemetry__"[^>]*>(.*?)</div>', body_str, re.DOTALL)
                 if tel_match:
                     try:
                         telemetry_data = json.loads(tel_match.group(1).strip())
-                        p_wait = telemetry_data.get("page_loaded_ms", 3000)
+                        p_wait = telemetry_data.get("page_loaded_ms", 3500)
                         offers_found = telemetry_data.get("offers_found", [])
                         clicked_list = telemetry_data.get("clicked", [])
                         scroll_info = telemetry_data.get("scroll_performed")
