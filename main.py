@@ -77,6 +77,191 @@ def parse_native_ratio(var_name: str, default_pct: float = 80.0) -> float:
     except Exception:
         return default_pct / 100.0
 
+# ---------------------------------------------------------
+# Semi Prefix Evaluation Helper & Q1-Q5 Variables
+# ---------------------------------------------------------
+def check_semi_prefix(config_key: str, default_val: str = "") -> tuple:
+    semi_key = f"SEMI_{config_key.upper()}"
+    if semi_key in ENV_MAP:
+        raw_val = ENV_MAP[semi_key].strip()
+        should_run = random.choice([True, False])
+        return should_run, raw_val
+    elif config_key.upper() in ENV_MAP:
+        return True, ENV_MAP[config_key.upper()].strip()
+    return True, default_val
+
+Q1_ACTIVE, RAW_BUTTON1 = check_semi_prefix("BUTTON1", "")
+Q2_ACTIVE, RAW_CLICK_COUNT = check_semi_prefix("CLICK_COUNT", "1")
+Q3_ACTIVE, RAW_SCROLL = check_semi_prefix("SCROLL", "off")
+Q4_ACTIVE, RAW_LOAD_WAIT = check_semi_prefix("LOAD_WAIT", "0")
+Q5_ACTIVE, RAW_TAB_MODE = check_semi_prefix("TAB_MODE", "background")
+
+RESPONSE_MODE = get_env("RESPONSE", "full").lower()
+SESSION_ENABLED = parse_bool("SESSION", default=True)
+
+def parse_button_tokens(raw_btn: str):
+    if not raw_btn:
+        return [], []
+    parts = raw_btn.split(";")
+    main_part = parts[0]
+    sub_part = parts[1] if len(parts) > 1 else ""
+
+    def extract_chains(chain_str):
+        chains = []
+        for token in [t.strip() for t in chain_str.split(",") if t.strip()]:
+            match = re.match(r"^([^{]+)\{([^}]+)\}$", token)
+            if match:
+                chains.append({"type": "parent_child", "parent": match.group(1).strip(), "child": match.group(2).strip()})
+            else:
+                chains.append({"type": "direct", "text": token})
+        return chains
+
+    return extract_chains(main_part), extract_chains(sub_part)
+
+MAIN_BUTTONS, SUB_BUTTONS = parse_button_tokens(RAW_BUTTON1)
+
+def parse_click_limit(raw_clicks: str):
+    if not raw_clicks:
+        return (1, 1)
+    parts = [p.strip() for p in raw_clicks.split(",") if p.strip()]
+    if len(parts) >= 2:
+        return (int(parse_num(parts[0], 1)), int(parse_num(parts[1], 1)))
+    elif len(parts) == 1:
+        v = int(parse_num(parts[0], 1))
+        return (v, v)
+    return (1, 1)
+
+CLICK_MIN, CLICK_MAX = parse_click_limit(RAW_CLICK_COUNT)
+
+def parse_scroll_spec(raw_scroll: str):
+    if not raw_scroll or raw_scroll.lower() == "off":
+        return {"mode": "off", "min_pct": 0, "max_pct": 0}
+    
+    match = re.match(r"^(before|after|random)\{([^\}]+)\}$", raw_scroll, re.IGNORECASE)
+    if match:
+        mode = match.group(1).lower()
+        sub_parts = [p.strip() for p in match.group(2).split(",") if p.strip()]
+        p_min = parse_num(sub_parts[0], 20) if len(sub_parts) > 0 else 20
+        p_max = parse_num(sub_parts[1], 100) if len(sub_parts) > 1 else 100
+        return {"mode": mode, "min_pct": min(100, max(0, p_min)), "max_pct": min(100, max(0, p_max))}
+
+    parts = [p.strip() for p in raw_scroll.split(",") if p.strip()]
+    if len(parts) >= 2:
+        return {"mode": "random", "min_pct": parse_num(parts[0], 20), "max_pct": parse_num(parts[1], 100)}
+    return {"mode": "off", "min_pct": 0, "max_pct": 0}
+
+SCROLL_SPEC = parse_scroll_spec(RAW_SCROLL)
+
+
+# ---------------------------------------------------------
+# Dynamic Browser JS Automation Generator
+# ---------------------------------------------------------
+def generate_browser_actions_js(bot_id: int, target_clicks: int, scroll_info: dict, tab_mode: str, load_delay: float):
+    actions_script = f"""
+    (() => {{
+        const logs = [];
+        const log = (msg) => logs.push(`[Bot-{bot_id}] ` + msg);
+        
+        let clickedCount = 0;
+        let mainDetected = false;
+        let subDetected = false;
+        const clickedElements = new Set();
+        
+        const mainSpecs = {json.dumps(MAIN_BUTTONS)};
+        const subSpecs = {json.dumps(SUB_BUTTONS)};
+        const maxClicks = {target_clicks};
+        const tabMode = "{tab_mode}";
+
+        function scanElements(spec) {{
+            const matches = [];
+            const candidates = Array.from(document.querySelectorAll('button, a, input[type="button"], input[type="submit"], [role="button"], div, span'));
+            
+            for (let el of candidates) {{
+                if (spec.type === "direct") {{
+                    if (el.textContent && el.textContent.includes(spec.text)) {{
+                        matches.push(el);
+                    }}
+                }} else if (spec.type === "parent_child") {{
+                    if (el.textContent && el.textContent.includes(spec.parent)) {{
+                        const inner = Array.from(el.querySelectorAll('*')).find(c => c.textContent && c.textContent.includes(spec.child));
+                        if (inner) matches.push(inner);
+                    }}
+                }}
+            }}
+            return matches;
+        }}
+
+        function doScroll(pct) {{
+            const targetY = (document.body.scrollHeight * (pct / 100));
+            window.scrollTo({{ top: targetY, behavior: 'smooth' }});
+            log(`Scrolled to ${{pct.toFixed(1)}}% (${{Math.round(targetY)}}px)`);
+        }}
+
+        function executeClick(el, label) {{
+            if (clickedElements.has(el) || clickedCount >= maxClicks) return false;
+            
+            if (tabMode === "background") {{
+                if (el.tagName === 'A' && el.href) {{
+                    window.open(el.href, '_blank');
+                    log(`Clicked (${{label}}) -> opened background tab: ${{el.href}}`);
+                }} else {{
+                    el.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, view: window }}));
+                    log(`Clicked (${{label}}) directly (background emulation)`);
+                }}
+            }} else {{
+                el.click();
+                log(`Clicked (${{label}}) directly in primary tab`);
+            }}
+            clickedElements.add(el);
+            clickedCount++;
+            return true;
+        }}
+
+        const scrollMode = "{scroll_info['mode']}";
+        const scrollPct = {random.uniform(scroll_info['min_pct'], scroll_info['max_pct']) if scroll_info['mode'] != 'off' else 0};
+
+        if (scrollMode === "before" || (scrollMode === "random" && Math.random() > 0.5)) {{
+            doScroll(scrollPct);
+        }}
+
+        for (let spec of mainSpecs) {{
+            const found = scanElements(spec);
+            if (found.length > 0) {{
+                mainDetected = true;
+                log(`Main button matched: "${{spec.text || spec.parent}}" (${{found.length}} present)`);
+                for (let el of found) {{
+                    if (clickedCount < maxClicks) executeClick(el, "MAIN");
+                }}
+            }}
+        }}
+
+        if (mainDetected && subSpecs.length > 0) {{
+            for (let spec of subSpecs) {{
+                const foundSub = scanElements(spec);
+                if (foundSub.length > 0) {{
+                    subDetected = true;
+                    log(`Sub-button matched: "${{spec.text || spec.parent}}" (${{foundSub.length}} present)`);
+                    for (let el of foundSub) {{
+                        if (clickedCount < maxClicks) executeClick(el, "SUB");
+                    }}
+                }}
+            }}
+        }}
+
+        if (scrollMode === "after" || (scrollMode === "random" && Math.random() <= 0.5)) {{
+            doScroll(scrollPct);
+        }}
+
+        return {{
+            totalClicked: clickedCount,
+            mainFound: mainDetected,
+            subFound: subDetected,
+            logs: logs
+        }};
+    }})();
+    """
+    return actions_script
+
 
 # ---------------------------------------------------------
 # Dynamic Tier Ratio Parser
@@ -105,9 +290,10 @@ T1_RATIO, T2_RATIO, T3_RATIO = parse_tier_ratio("TIER_RATIO", (70.0, 25.0, 5.0))
 
 
 # =========================================================
-# MANUAL USER AGENT POOLS
+# MANUAL USER AGENT POOLS (AUTHENTIC TOKENS LINE BY LINE)
 # =========================================================
 
+# --- WINDOWS CHROME (Native to Windows/PC) ---
 WIN_CHROME_HIGH = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36",
@@ -141,6 +327,7 @@ WIN_CHROME_LOW = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
 ]
 
+# --- WINDOWS EDGE (Microsoft Native) ---
 WIN_EDGE_HIGH = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36 Edg/153.0.0.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36 Edg/152.0.0.0",
@@ -166,6 +353,7 @@ WIN_EDGE_LOW = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
 ]
 
+# --- WINDOWS FIREFOX ---
 WIN_FF_HIGH = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:152.0) Gecko/20100101 Firefox/152.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:150.0) Gecko/20100101 Firefox/150.0",
@@ -189,6 +377,7 @@ WIN_FF_LOW = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 
+# --- WINDOWS OPERA ---
 WIN_OPERA_HIGH = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36 OPR/117.0.0.0",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36 OPR/115.0.0.0",
@@ -207,6 +396,7 @@ WIN_OPERA_LOW = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 OPR/91.0.0.0",
 ]
 
+# --- MACOS SAFARI (Apple Native) ---
 MAC_SAFARI_HIGH = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15",
@@ -226,6 +416,7 @@ MAC_SAFARI_LOW = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.6 Safari/605.1.15",
 ]
 
+# --- MACOS CHROME ---
 MAC_CHROME_HIGH = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
@@ -246,6 +437,7 @@ MAC_CHROME_LOW = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 ]
 
+# --- MACOS FIREFOX ---
 MAC_FF_HIGH = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:152.0) Gecko/20100101 Firefox/152.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:149.0) Gecko/20100101 Firefox/149.0",
@@ -264,6 +456,7 @@ MAC_FF_LOW = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:125.0) Gecko/20100101 Firefox/125.0",
 ]
 
+# --- MACOS OPERA ---
 MAC_OPERA_ALL = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36 OPR/116.0.0.0",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 OPR/113.0.0.0",
@@ -273,6 +466,7 @@ MAC_OPERA_ALL = [
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36 OPR/98.0.0.0",
 ]
 
+# --- LINUX CHROME / FIREFOX ---
 LINUX_CHROME_HIGH = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Safari/537.36",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
@@ -314,6 +508,7 @@ LINUX_OPERA_ALL = [
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36 OPR/106.0.0.0",
 ]
 
+# --- IOS SAFARI (Apple Mobile Native) ---
 IOS_SAFARI_HIGH = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_3 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1",
@@ -333,6 +528,7 @@ IOS_SAFARI_LOW = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
 ]
 
+# --- IOS SECONDARY (CriOS, FxiOS, OPT) ---
 IOS_CHROME_HIGH = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/152.0.0.0 Mobile/15E148 Safari/604.1",
     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) CriOS/150.0.0.0 Mobile/15E148 Safari/604.1",
@@ -363,6 +559,7 @@ IOS_OPERA_ALL = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 17_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) OPT/4.8.0 Mobile/15E148 Safari/604.1",
 ]
 
+# --- ANDROID CHROME (Google Android Native) ---
 ANDROID_CHROME_HIGH = [
     "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
     "Mozilla/5.0 (Linux; Android 15; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Mobile Safari/537.36",
@@ -394,6 +591,7 @@ ANDROID_CHROME_LOW = [
     "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Mobile Safari/537.36",
 ]
 
+# --- ANDROID SAMSUNG INTERNET ---
 ANDROID_SAMSUNG_HIGH = [
     "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/26.0 Chrome/122.0.0.0 Mobile Safari/537.36",
     "Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/25.0 Chrome/121.0.0.0 Mobile Safari/537.36",
@@ -412,6 +610,7 @@ ANDROID_SAMSUNG_LOW = [
     "Mozilla/5.0 (Linux; Android 10; SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) SamsungBrowser/18.0 Chrome/99.0.0.0 Mobile Safari/537.36",
 ]
 
+# --- ANDROID FIREFOX (Strict Handheld Mobile Token) ---
 ANDROID_FF_ALL = [
     "Mozilla/5.0 (Android 15; Mobile; rv:152.0) Gecko/152.0 Firefox/152.0",
     "Mozilla/5.0 (Android 15; Mobile; rv:150.0) Gecko/150.0 Firefox/150.0",
@@ -427,6 +626,7 @@ ANDROID_FF_ALL = [
     "Mozilla/5.0 (Android 11; Mobile; rv:128.0) Gecko/128.0 Firefox/128.0",
 ]
 
+# --- ANDROID OPERA (Strict Handheld Mobile Token) ---
 ANDROID_OPERA_ALL = [
     "Mozilla/5.0 (Linux; Android 15; SM-S938B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Mobile Safari/537.36 OPR/88.0.0.0",
     "Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Mobile Safari/537.36 OPR/86.0.0.0",
@@ -624,6 +824,7 @@ def get_ua_for_selection(category: str, os_name: str, browser: str) -> tuple:
     if category == "desktop" and CUSTOM_DESKTOP_UAS:
         return random.choice(CUSTOM_DESKTOP_UAS), "Custom:Desktop"
 
+    # Strict Mobile Routing
     if category == "mobile":
         if os_name == "android":
             if browser == "firefox":
@@ -649,6 +850,7 @@ def get_ua_for_selection(category: str, os_name: str, browser: str) -> tuple:
 
         return random.choice(ANDROID_FF_ALL), "Android:Firefox"
 
+    # Strict Desktop Routing
     if category == "desktop":
         if os_name == "windows":
             if browser == "firefox":
@@ -862,6 +1064,7 @@ def pick_datacenter_country(used_countries_in_cycle: set):
         used_countries_in_cycle.add(c_up)
         return f"{t_name}-{c_up}", c_up, c_low
 
+    # If pool is empty (e.g. user set an unsupported code with no route change allowed)
     if not ROUTE_CHANGE_ON_UNAVAILABLE:
         if INC_COUNTRIES:
             locked = sorted(list(INC_COUNTRIES))[0]
@@ -869,6 +1072,7 @@ def pick_datacenter_country(used_countries_in_cycle: set):
             return f"LOCKED-{locked}", locked, locked.lower()
         return "UNSET", "", ""
 
+    # Route change fallback
     fallback_pool = [(c, c.lower(), n) for c, n in ALL_DATACENTER_NON_PREMIUM if c not in EXC_COUNTRIES]
     if fallback_pool:
         c_up, c_low, _ = random.choice(fallback_pool)
@@ -876,6 +1080,104 @@ def pick_datacenter_country(used_countries_in_cycle: set):
         return f"FALLBACK-{c_up}", c_up, c_low
 
     return "DC", "US", "us"
+
+
+# ---------------------------------------------------------
+# Dynamic Slug & Link Engine (Non-Repeating per Cycle)
+# ---------------------------------------------------------
+class CycleLinkDispatcher:
+    def __init__(self, raw_links: list, short_template: str):
+        self.raw_links = raw_links
+        self.short_template = short_template
+        self.full_links = []
+        self.explicit_short_links = []
+        self._categorize()
+
+    def _categorize(self):
+        for item in self.raw_links:
+            item = item.strip()
+            if not item:
+                continue
+
+            parsed = urllib.parse.urlparse(item)
+            is_url = bool(parsed.scheme and parsed.netloc)
+            slug = None
+
+            if is_url:
+                query = urllib.parse.parse_qs(parsed.query)
+                for param in ("via", "ref", "r", "referral", "aff", "code", "id", "tag"):
+                    if param in query and query[param]:
+                        slug = query[param][0]
+                        break
+                if not slug:
+                    path_parts = [p for p in parsed.path.split("/") if p]
+                    if path_parts:
+                        slug = path_parts[-1]
+
+                if not parsed.query and slug and self.short_template and self.short_template in item:
+                    self.explicit_short_links.append((item, slug))
+                else:
+                    self.full_links.append((item, slug if slug else "link"))
+            else:
+                self.full_links.append((item, item))
+
+    def generate_cycle_batch(self, worker_count: int):
+        used_slugs = set()
+        used_urls = set()
+        tasks = []
+
+        pool = []
+        for url, sl in self.full_links:
+            pool.append(("FULL", url, sl))
+        for url, sl in self.explicit_short_links:
+            pool.append(("SHORT_CUSTOM", url, sl))
+
+        random.shuffle(pool)
+
+        def make_short_url(slug: str, reference: str) -> str:
+            if not reference:
+                return ""
+            if "{slug}" in reference:
+                return reference.replace("{slug}", slug)
+            parsed = urllib.parse.urlparse(reference)
+            base_domain = f"{parsed.scheme}://{parsed.netloc}"
+            parts = [p for p in parsed.path.split("/") if p]
+            if len(parts) > 1:
+                prefix = "/".join(parts[:-1])
+                return f"{base_domain}/{prefix}/{slug}"
+            return f"{base_domain}/{slug}"
+
+        for kind, raw_target, slug in pool:
+            if len(tasks) >= worker_count:
+                break
+
+            if len(pool) >= worker_count:
+                if slug in used_slugs or raw_target in used_urls:
+                    continue
+
+            final_url = raw_target
+            ltype = "DIRECT"
+
+            if kind == "SHORT_CUSTOM":
+                ltype = "SHORT (OWN)"
+            elif self.short_template and slug:
+                roll = random.random()
+                short_cand = make_short_url(slug, self.short_template)
+                if roll >= 0.86 and short_cand:
+                    final_url = short_cand
+                    ltype = "SHORT (/)"
+                else:
+                    ltype = "FULL (?)"
+
+            used_slugs.add(slug)
+            used_urls.add(final_url)
+            tasks.append((final_url, slug, ltype))
+
+        while len(tasks) < worker_count and pool:
+            kind, raw_target, slug = random.choice(pool)
+            tasks.append((raw_target, slug, kind))
+
+        return tasks
 
 
 # ---------------------------------------------------------
@@ -950,14 +1252,7 @@ CYCLE_MIN, CYCLE_MAX = parse_range("CYCLE_INTERVAL_RANGE", 50.0, 70.0)
 POST_WAIT_MIN, POST_WAIT_MAX = parse_range("POST_RESPONSE_WAIT_RANGE", 5.0, 15.0)
 
 BROWSER_RENDERING = get_env("BROWSER_RENDERING", "true").lower()
-RESIDENTIAL = parse_bool("RESIDENTIAL", default=False)
-STICKY_SESSION = parse_bool("STICKY_SESSION", default=True)
-
-BOT_POOL_SALT = random.randint(100000, 999999)
-
-def get_bot_session_id(bot_id: int) -> str:
-    session_num = 10000000 + (bot_id * 500000) + (BOT_POOL_SALT % 500000)
-    return str(session_num)
+RESIDENTIAL = parse_bool("RESIDENTIAL", default=True)
 
 DEFAULT_REFERRERS = [
     "none",
@@ -991,8 +1286,8 @@ def calculate_credits(render_flag: str, is_residential: bool) -> int:
 # Worker Bot Execution
 # ---------------------------------------------------------
 def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype: str, stagger_delay: float, selected_cat: str, selected_ua: str, os_label: str, tier_label: str, code_upper: str, code_lower: str):
-    bot_start_time = time.time()
     time.sleep(stagger_delay)
+    start_time = time.time()
 
     key_obj = pool.get_key()
     if not key_obj:
@@ -1000,93 +1295,87 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
 
     expected_credits = calculate_credits(BROWSER_RENDERING, RESIDENTIAL)
     truncated_target = truncate_url(target_url, head_len=18, tail_len=14)
+    rotation_seed = f"sess_{random.randint(1000000, 9999999)}" if SESSION_ENABLED else ""
 
-    if STICKY_SESSION:
-        session_id = get_bot_session_id(bot_id)
-        session_tag = f"Sticky:{session_id}"
-    else:
-        session_id = str(random.randint(1000000, 9999999))
-        session_tag = "Rotate"
+    load_delay = 0.0
+    if Q4_ACTIVE and RAW_LOAD_WAIT:
+        d_min, d_max = parse_range("LOAD_WAIT", 0, 0)
+        load_delay = random.uniform(d_min, d_max)
 
-    bot_scroll_timing, bot_scroll_pct = resolve_bot_scroll()
-    needs_automation = bool(BUTTON_CLICK_ENABLE or (bot_scroll_timing != "off"))
-    runtime_render = "true" if needs_automation else BROWSER_RENDERING
+    target_clicks = random.randint(CLICK_MIN, CLICK_MAX) if Q2_ACTIVE else 1
+    tab_mode = RAW_TAB_MODE if Q5_ACTIVE else "background"
+    scroll_cfg = SCROLL_SPEC if Q3_ACTIVE else {"mode": "off", "min_pct": 0, "max_pct": 0}
 
-    tags = []
-    if BUTTON_CLICK_ENABLE:
-        target_display = BUTTON_TARGETS[0] if BUTTON_TARGETS else "Auto-Offer"
-        tags.append(f"[BTN:{target_display}]")
-    if bot_scroll_timing != "off":
-        tags.append(f"[SCRL:{bot_scroll_timing}@{bot_scroll_pct}%]")
-
-    extra_tags_str = " " + " ".join(tags) if tags else ""
+    js_instructions = generate_browser_actions_js(bot_id, target_clicks, scroll_cfg, tab_mode, load_delay)
 
     params = {
         "api_key": key_obj.token,
-        "url": target_url,
         "device_type": selected_cat,
-        "render": runtime_render,
+        "render": BROWSER_RENDERING,
         "keep_headers": "true",
-        "session_number": session_id,
         "follow_redirect": "true" if FOLLOW_REDIRECT else "false",
-        "retry": "false"
+        "retry": "false",
+        "url": target_url
     }
+    
     if code_upper:
         params["country_code"] = code_upper.lower()
     if RESIDENTIAL:
         params["premium"] = "true"
+    if SESSION_ENABLED and rotation_seed:
+        params["session_number"] = rotation_seed
+        
+    if BROWSER_RENDERING == "true":
+        params["js_scenario"] = json.dumps({
+            "instructions": [
+                {"wait": int(load_delay * 1000)},
+                {"evaluate": js_instructions}
+            ]
+        })
 
-    endpoint_get = f"http://api.scraperapi.com?{urllib.parse.urlencode(params)}"
-
+    url = f"http://api.scraperapi.com?{urllib.parse.urlencode(params)}"
+    
     if MATCH_IP_LANGUAGE and code_lower and code_upper:
         dynamic_lang = f"{code_lower}-{code_upper},{code_lower};q=0.9,en-US;q=0.8,en;q=0.5"
     else:
         dynamic_lang = "en-US,en;q=0.9"
 
-    chosen_referrer = random.choice(REFERRERS)
-    ref_display = chosen_referrer if (chosen_referrer and chosen_referrer.lower() not in ("none", "direct", "empty")) else "Direct"
-
     headers = {
         "User-Agent": selected_ua,
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language": dynamic_lang,
-        "Connection": "close"
+        "Connection": "keep-alive" if RESPONSE_MODE == "full" else "close"
     }
-    if ref_display != "Direct":
-        headers["Referer"] = ref_display
-
+    
     if selected_cat == "mobile":
         headers["Sec-CH-UA-Mobile"] = "?1"
         headers["Sec-CH-UA-Platform"] = '"Android"' if "Android" in selected_ua else '"iOS"'
     else:
         headers["Sec-CH-UA-Mobile"] = "?0"
 
-    # Pass the action instruction set through the header
-    if needs_automation:
-        instructions_list = build_scraperapi_instruction_set(bot_scroll_timing, bot_scroll_pct)
-        headers["x-sapi-instruction_set"] = json.dumps(instructions_list)
+    chosen_referrer = random.choice(REFERRERS)
+    if chosen_referrer and chosen_referrer.lower() not in ("none", "direct", "empty"):
+        headers["Referer"] = chosen_referrer
+        ref_display = chosen_referrer
+    else:
+        ref_display = "Direct"
 
-    req = urllib.request.Request(endpoint_get, headers=headers)
+    req = urllib.request.Request(url, headers=headers)
 
     try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            response_chunks = []
-            while True:
-                chunk = resp.read(65536)
-                if not chunk:
-                    break
-                response_chunks.append(chunk)
-            full_body = b"".join(response_chunks)
-            body_size_kb = len(full_body) / 1024.0
-            body_str = full_body.decode("utf-8", errors="ignore")
-
+        req_start = time.time()
+        timeout_val = 95 if RESPONSE_MODE == "full" else 45
+        with urllib.request.urlopen(req, timeout=timeout_val) as resp:
             actual_credits = resp.headers.get("sa-credit-cost", str(expected_credits))
+            
             exit_country = (
                 resp.headers.get("sa-proxy-country") 
                 or resp.headers.get("sa-country") 
                 or resp.headers.get("x-scraperapi-country") 
                 or ""
             ).strip().upper()
+
+            req_duration = time.time() - req_start
 
             if INC_COUNTRIES and code_upper and exit_country and exit_country != code_upper:
                 print(
@@ -1097,20 +1386,10 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
                 country_tag = exit_country if exit_country else code_upper
                 print(
                     f"[Bot-{bot_id}/{total_bots}] [{tier_label}-{country_tag}] [{selected_cat.upper()}:{os_label}] "
-                    f"[{ltype} {slug}] [{session_tag}]{extra_tags_str} [Target: {truncated_target}] [Ref: {ref_display}] "
-                    f"[Body: {body_size_kb:.1f} KB] [Credits: ~{actual_credits} cost] [{key_obj.tag}] -> HTTP {resp.status} OK"
+                    f"[{ltype} {slug}] [Target: {truncated_target}] [Ref: {ref_display}] "
+                    f"[Clicks: target={target_clicks}] [Scroll: {scroll_cfg['mode']}] "
+                    f"[Credits: ~{actual_credits} cost] [{key_obj.tag}] -> HTTP {resp.status} OK ({req_duration:.1f}s)"
                 )
-
-                if BUTTON_CLICK_ENABLE:
-                    detected_offers = re.findall(r'<a[^>]+>(?:<[^>]+>)*\s*([^<>\n\r]{3,50})\s*(?:<[^>]+>)*</a>', body_str)
-                    clean_offers = [o.strip() for o in detected_offers if not o.strip().startswith("http") and len(o.strip()) > 3]
-                    clean_offers = list(dict.fromkeys(clean_offers))[:4]
-
-                    if clean_offers:
-                        print(f"       -> [Page Ready]: Stabilized | Offers Discovered: {clean_offers}")
-                        print(f"       -> [BUTTON ACTION SUCCESS]: Click Trigger Dispatched to -> \"{clean_offers[0]}\"")
-                    else:
-                        print(f"       -> [Page Ready]: Stabilized | Targeted Click Dispatched via Instruction Set")
 
     except urllib.error.HTTPError as e:
         try:
@@ -1122,19 +1401,21 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
             reason_msg = f"HTTP {e.code} - Actual ScraperAPI Error: {raw_detail}"
             pool.mark_dead(key_obj, reason_msg)
         elif e.code == 429:
-            print(f"[Bot-{bot_id}/{total_bots}] [{key_obj.tag}] [Target: {truncated_target}] [Credits: 0] [TRANSIENT] HTTP 429 Rate limit exceeded")
+            print(f"[Bot-{bot_id}] [{key_obj.tag}] [Target: {truncated_target}] [Credits: 0] [TRANSIENT] HTTP 429 Rate limit exceeded")
         else:
-            print(f"[Bot-{bot_id}/{total_bots}] [{key_obj.tag}] [Target: {truncated_target}] [Credits: 0] [WARN] HTTP {e.code}: {raw_detail}")
+            print(f"[Bot-{bot_id}] [{key_obj.tag}] [Target: {truncated_target}] [Credits: 0] [WARN] HTTP {e.code}: {raw_detail}")
 
     except Exception as ex:
-        print(f"[Bot-{bot_id}/{total_bots}] [{key_obj.tag}] [Target: {truncated_target}] [Credits: 0] [CLIENT ERROR]: {str(ex)}")
+        print(f"[Bot-{bot_id}] [{key_obj.tag}] [Target: {truncated_target}] [Credits: 0] [CLIENT ERROR]: {str(ex)}")
+
+    if RESPONSE_MODE == "full":
+        remaining_hold = max(0.0, load_delay - (time.time() - start_time))
+        if remaining_hold > 0:
+            time.sleep(remaining_hold)
 
     post_wait = random.uniform(POST_WAIT_MIN, POST_WAIT_MAX)
     gap_wait = random.uniform(GAP_MIN, GAP_MAX)
     time.sleep(post_wait + gap_wait)
-
-    duration = time.time() - bot_start_time
-    print(f"[Bot-{bot_id}/{total_bots}] Finished fully and safely detached (Work Duration: {duration:.1f}s)")
 
 
 # ---------------------------------------------------------
@@ -1144,7 +1425,17 @@ def main():
     print("==================================================")
     print("      UNIVERSAL SCRAPER ENGINE RUNTIME            ")
     print("==================================================")
-
+    print(" [DASHBOARD CONFIGURATION & ENABLED OPTIONS]")
+    print(f"  * RESIDENTIAL Proxies   : {RESIDENTIAL} (Default: True)")
+    print(f"  * BROWSER RENDERING     : {BROWSER_RENDERING} (Default: True)")
+    print(f"  * STICKY SESSIONS       : {SESSION_ENABLED} (Default: True)")
+    print(f"  * RESPONSE HOLD MODE    : {RESPONSE_MODE} (Default: full)")
+    print(f"  * Q1 (Buttons / Subs)   : Enabled={Q1_ACTIVE} | Specs={RAW_BUTTON1 or 'None'}")
+    print(f"  * Q2 (Click Matches)    : Enabled={Q2_ACTIVE} | Range={CLICK_MIN} to {CLICK_MAX}")
+    print(f"  * Q3 (Scroll Engine)    : Enabled={Q3_ACTIVE} | Spec={RAW_SCROLL}")
+    print(f"  * Q4 (Load Delay)       : Enabled={Q4_ACTIVE} | Spec={RAW_LOAD_WAIT}s")
+    print(f"  * Q5 (Tab Open Mode)    : Enabled={Q5_ACTIVE} | Mode={RAW_TAB_MODE}")
+    print("==================================================")
     print_datacenter_countries_table()
 
     if not INPUT_LINKS:
@@ -1162,20 +1453,19 @@ def main():
     print(f"Excluded Countries      : {exc_display}")
     print(f"Working Datacenter Pool : {TOTAL_VALID} active (T1: {len(VALID_T1)} | T2: {len(VALID_T2)} | T3: {len(VALID_T3)})")
     print(f"Tier Selection Ratios   : T1={T1_RATIO:.1f}% | T2={T2_RATIO:.1f}% | T3={T3_RATIO:.1f}%")
-    print(f"Route Change Fallback   : {ROUTE_CHANGE_ON_UNAVAILABLE}")
+    print(f"Route Change Fallback   : {ROUTE_CHANGE_ON_UNAVAILABLE} (Default: False)")
     print("--------------------------------------------------")
     print(f"Follow Redirects        : {FOLLOW_REDIRECT}")
     print(f"Total Active Keys       : {len(pool.active_keys)}")
     print(f"Parallel Bots Enabled   : {PARALLELBOT}")
-    print(f"Browser Rendering (JS)  : {BROWSER_RENDERING}")
-    print(f"Residential Proxies     : {'ENABLED (premium=true)' if RESIDENTIAL else 'DISABLED (Standard DataCenter)'}")
-    print(f"Sticky Sessions         : {'ENABLED (Each bot keeps its own locked IP)' if STICKY_SESSION else 'DISABLED (Rotating)'}")
-    print(f"Scroll Engine           : {'OFF' if PARSED_SCROLL_MODE == 'off' else f'{PARSED_SCROLL_MODE.upper()} ({SCROLL_MIN_PCT}% - {SCROLL_MAX_PCT}%)'}")
-    print(f"Button Auto-Click L1    : {'ENABLED' if BUTTON_CLICK_ENABLE else 'DISABLED'} (Targets: {BUTTON_TARGETS})")
-    print(f"Button L1 Settings      : Mode={BUTTON_SELECTION_MODE} | Count={BUTTON_CLICK_COUNT} | PageLoadWait={BUTTON_PAGE_LOAD_WAIT}")
-    print(f"Button Auto-Click L2    : {'ENABLED' if (BUTTON_CLICK_ENABLE and BUTTON_L2_CLICK_ENABLE) else 'DISABLED'} (Targets: {BUTTON_L2_TARGETS})")
-    print(f"Button L2 Settings      : Mode={BUTTON_L2_SELECTION_MODE} | Count={BUTTON_L2_CLICK_COUNT} | Delay={L2_DELAY_MIN}s-{L2_DELAY_MAX}s")
     print(f"Est. Credits Per Hit    : ~{calculate_credits(BROWSER_RENDERING, RESIDENTIAL)} credits")
+    print(f"Active Device Hierarchy : {DEVICE_TREE}")
+    print(f"Native Browser Weight   : {int(NATIVE_RATIO * 100)}% Native / {int((1.0 - NATIVE_RATIO) * 100)}% Others")
+    print(f"Post-Response Cooldown  : {POST_WAIT_MIN:.1f}s - {POST_WAIT_MAX:.1f}s")
+    print(f"Worker Gap Interval     : {GAP_MIN:.1f}s - {GAP_MAX:.1f}s")
+    print(f"Cycle Interval Range    : {CYCLE_MIN:.1f}s - {CYCLE_MAX:.1f}s")
+    print(f"Cycle Gap Duration      : {CYCLE_GAP}s")
+    print(f"Dynamic IP Language     : {MATCH_IP_LANGUAGE}")
     print("==================================================\n")
 
     cycle_num = 1
@@ -1193,24 +1483,24 @@ def main():
             worker_count = random.randint(int(WORKER_MIN), int(WORKER_MAX))
             target_cycle_time = random.uniform(CYCLE_MIN, CYCLE_MAX)
 
-            print(f"\n--- [Cycle #{cycle_num}] Starting {worker_count} bots | Target Window: {target_cycle_time:.1f}s | Active Keys: {len(pool.active_keys)} ---")
+            print(f"\n--- [Cycle #{cycle_num}] Starting {worker_count} bots | Target: {target_cycle_time:.1f}s | Active Keys: {len(pool.active_keys)} ---")
 
             tasks = LINK_DISPATCHER.generate_cycle_batch(worker_count)
             
+            # Unique User Agents per cycle
             used_uas_this_cycle = set()
             bot_ua_assignments = [resolve_cycle_ua(used_uas_this_cycle) for _ in range(worker_count)]
             
+            # Unique Countries per cycle
             used_countries_this_cycle = set()
             bot_country_assignments = [pick_datacenter_country(used_countries_this_cycle) for _ in range(worker_count)]
 
-            # -------------------------------------------------------------
-            # STRICT EXECUTION BARRIER: AWAIT ALL ASSIGNED BOTS COMPLETION
-            # -------------------------------------------------------------
             if PARALLELBOT:
                 with concurrent.futures.ThreadPoolExecutor(max_workers=worker_count) as executor:
                     futures = []
                     for idx, (url, slug, ltype) in enumerate(tasks):
                         stagger = idx * random.uniform(GAP_MIN, GAP_MAX)
+                        
                         cat, ua_str, ua_label = bot_ua_assignments[idx]
                         tier_label, code_upper, code_lower = bot_country_assignments[idx]
                         
@@ -1220,10 +1510,11 @@ def main():
                                 cat, ua_str, ua_label, tier_label, code_upper, code_lower
                             )
                         )
-                    concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_COMPLETED)
+                    concurrent.futures.wait(futures)
             else:
                 for idx, (url, slug, ltype) in enumerate(tasks):
                     stagger = idx * random.uniform(GAP_MIN, GAP_MAX)
+                    
                     cat, ua_str, ua_label = bot_ua_assignments[idx]
                     tier_label, code_upper, code_lower = bot_country_assignments[idx]
                     
@@ -1231,15 +1522,16 @@ def main():
                                 cat, ua_str, ua_label, tier_label, code_upper, code_lower)
 
             elapsed = time.time() - cycle_start
-            wait_time = target_cycle_time - elapsed
+            wait_remain = target_cycle_time - elapsed
 
             pool.print_pinned_status()
 
-            if wait_time > 0 and pool.active_keys:
-                print(f"--- [Cycle #{cycle_num} Complete] All {worker_count} bots ended cleanly (Active: {elapsed:.1f}s) | Pausing {wait_time:.1f}s to reach target window ---")
-                time.sleep(wait_time)
+            if wait_remain > 0 and pool.active_keys:
+                print(f"--- [Cycle #{cycle_num} Complete] All bots closed. Elapsed: {elapsed:.1f}s | Waiting out remaining {wait_remain:.1f}s before next round ---")
+                time.sleep(wait_remain)
             elif pool.active_keys:
-                print(f"--- [Cycle #{cycle_num} Complete] All {worker_count} bots ended cleanly (Total: {elapsed:.1f}s, exceeded target {target_cycle_time:.1f}s) | Moving to next cycle ---")
+                overtime = abs(wait_remain)
+                print(f"--- [Cycle #{cycle_num} Complete] [REAL-TIME LOG] Bots took {overtime:.1f}s longer than target cycle time. Elapsed: {elapsed:.1f}s | Starting next round immediately ---")
 
             if CYCLE_GAP > 0 and pool.active_keys:
                 print(f"--- Applying explicit Cycle Gap of {CYCLE_GAP}s ---")
@@ -1248,7 +1540,7 @@ def main():
             cycle_num += 1
 
     except KeyboardInterrupt:
-        print("\nShutdown signal caught. Exiting cleanly.")
+        print("\nShutdown signal caught. Exiting.")
         sys.exit(0)
 
 if __name__ == "__main__":
