@@ -9,6 +9,7 @@ import time
 import urllib.parse
 import urllib.request
 import urllib.error
+import base64
 
 # ---------------------------------------------------------
 # Environment Parsers & Utilities (Case-Insensitive)
@@ -160,12 +161,13 @@ def generate_browser_actions_js(bot_id: int, target_clicks: int, scroll_info: di
     actions_script = f"""
     (() => {{
         const logs = [];
-        const log = (msg) => logs.push(`[Bot-{bot_id}] ` + msg);
+        const log = (msg) => logs.push(`[Bot-{bot_id} JS] ` + msg);
         
         let clickedCount = 0;
         let mainDetected = false;
         let subDetected = false;
         const clickedElements = new Set();
+        const clickUrls = [];
         
         const mainSpecs = {json.dumps(MAIN_BUTTONS)};
         const subSpecs = {json.dumps(SUB_BUTTONS)};
@@ -200,10 +202,16 @@ def generate_browser_actions_js(bot_id: int, target_clicks: int, scroll_info: di
         function executeClick(el, label) {{
             if (clickedElements.has(el) || clickedCount >= maxClicks) return false;
             
+            let targetUrl = "";
+            if (el.tagName === 'A' && el.href) {{
+                targetUrl = el.href;
+                clickUrls.push(targetUrl);
+            }}
+
             if (tabMode === "background") {{
-                if (el.tagName === 'A' && el.href) {{
-                    window.open(el.href, '_blank');
-                    log(`Clicked (${{label}}) -> opened background tab: ${{el.href}}`);
+                if (targetUrl) {{
+                    window.open(targetUrl, '_blank');
+                    log(`Clicked (${{label}}) -> opened background tab: ${{targetUrl}}`);
                 }} else {{
                     el.dispatchEvent(new MouseEvent('click', {{ bubbles: true, cancelable: true, view: window }}));
                     log(`Clicked (${{label}}) directly (background emulation)`);
@@ -232,6 +240,8 @@ def generate_browser_actions_js(bot_id: int, target_clicks: int, scroll_info: di
                 for (let el of found) {{
                     if (clickedCount < maxClicks) executeClick(el, "MAIN");
                 }}
+            }} else {{
+                log(`Main button MISSING: "${{spec.text || spec.parent}}" (Check for typos!)`);
             }}
         }}
 
@@ -252,12 +262,22 @@ def generate_browser_actions_js(bot_id: int, target_clicks: int, scroll_info: di
             doScroll(scrollPct);
         }}
 
-        return {{
+        // Safely pass data back to Python via base64 hidden element
+        const resultData = {{
             totalClicked: clickedCount,
             mainFound: mainDetected,
             subFound: subDetected,
-            logs: logs
+            logs: logs,
+            clickUrls: clickUrls
         }};
+        const b64 = btoa(unescape(encodeURIComponent(JSON.stringify(resultData))));
+        const b = document.createElement('span');
+        b.id = 'bot_logs_b64';
+        b.style.display = 'none';
+        b.innerText = b64;
+        document.body.appendChild(b);
+        
+        return resultData;
     }})();
     """
     return actions_script
@@ -1367,6 +1387,21 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
         timeout_val = 95 if RESPONSE_MODE == "full" else 45
         with urllib.request.urlopen(req, timeout=timeout_val) as resp:
             actual_credits = resp.headers.get("sa-credit-cost", str(expected_credits))
+            page_content = resp.read().decode("utf-8", errors="ignore")
+            
+            # --- EXTRACT INTERNAL BROWSER JS LOGS ---
+            js_data = {}
+            match = re.search(r'<span id="bot_logs_b64".*?>(.*?)</span>', page_content)
+            if match:
+                try:
+                    b64_str = match.group(1).strip()
+                    js_data = json.loads(base64.b64decode(b64_str).decode('utf-8'))
+                except Exception:
+                    pass
+
+            actual_clicks = js_data.get('totalClicked', 0)
+            js_logs = js_data.get('logs', [])
+            click_urls = js_data.get('clickUrls', [])
             
             exit_country = (
                 resp.headers.get("sa-proxy-country") 
@@ -1387,9 +1422,34 @@ def execute_bot(bot_id: int, total_bots: int, target_url: str, slug: str, ltype:
                 print(
                     f"[Bot-{bot_id}/{total_bots}] [{tier_label}-{country_tag}] [{selected_cat.upper()}:{os_label}] "
                     f"[{ltype} {slug}] [Target: {truncated_target}] [Ref: {ref_display}] "
-                    f"[Clicks: target={target_clicks}] [Scroll: {scroll_cfg['mode']}] "
+                    f"[Actual Clicks: {actual_clicks}/{target_clicks}] [Scroll: {scroll_cfg['mode']}] "
                     f"[Credits: ~{actual_credits} cost] [{key_obj.tag}] -> HTTP {resp.status} OK ({req_duration:.1f}s)"
                 )
+                
+                # Print exact inner-browser logs so the user knows if it matched their text correctly
+                for l in js_logs:
+                    print(f"    |-- {l}")
+
+                # --- SECONDARY REQUEST (SAME SESSION) IF LINKS WERE CLICKED ---
+                if click_urls:
+                    for curl in click_urls:
+                        print(f"    |-- [SECONDARY NAV] Triggering new page load in SAME session: {truncate_url(curl, 30, 20)}")
+                        
+                        sec_params = params.copy()
+                        sec_params['url'] = curl
+                        # Remove JS scenario for the secondary pageview
+                        if 'js_scenario' in sec_params:
+                            del sec_params['js_scenario']
+                        
+                        sec_url = f"http://api.scraperapi.com?{urllib.parse.urlencode(sec_params)}"
+                        sec_req = urllib.request.Request(sec_url, headers=headers)
+                        try:
+                            with urllib.request.urlopen(sec_req, timeout=timeout_val) as sec_resp:
+                                sec_credits = sec_resp.headers.get("sa-credit-cost", str(expected_credits))
+                                print(f"    |-- [SECONDARY NAV SUCCESS] [Credits: ~{sec_credits} cost added to {key_obj.tag}]")
+                        except Exception as e:
+                            print(f"    |-- [SECONDARY NAV FAILED] -> {str(e)}")
+
 
     except urllib.error.HTTPError as e:
         try:
